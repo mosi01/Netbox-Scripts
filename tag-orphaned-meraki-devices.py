@@ -30,10 +30,10 @@ class TagOrphanedMerakiDevices(Script):
             orgs = requests.get("https://api.meraki.com/api/v1/organizations", headers=headers).json()
             org_id = orgs[0].get("id")
             if not org_id:
-                self.log_failure("❌ No Meraki organization found.")
+                self.log_failure("No Meraki organization found.")
                 return
         except Exception as e:
-            self.log_failure(f"❌ Meraki org error: {e}")
+            self.log_failure(f"Meraki org error: {e}")
             return
 
         try:
@@ -41,7 +41,7 @@ class TagOrphanedMerakiDevices(Script):
                 f"https://api.meraki.com/api/v1/organizations/{org_id}/devices", headers=headers
             ).json()
         except Exception as e:
-            self.log_failure(f"❌ Error fetching Meraki devices: {e}")
+            self.log_failure(f"Error fetching Meraki devices: {e}")
             return
 
         dashboard_serials = {d.get("serial") for d in dashboard if d.get("serial")}
@@ -50,13 +50,13 @@ class TagOrphanedMerakiDevices(Script):
         try:
             manufacturer = Manufacturer.objects.get(name="Cisco Meraki")
         except Manufacturer.DoesNotExist:
-            self.log_failure("❌ Manufacturer 'Cisco Meraki' not found in NetBox.")
+            self.log_failure("Manufacturer 'Cisco Meraki' not found in NetBox.")
             return
 
         try:
             orphaned_tag = Tag.objects.get(slug="orphaned")
         except Tag.DoesNotExist:
-            self.log_failure("❌ Tag with slug='orphaned' not found.")
+            self.log_failure("Tag with slug='orphaned' not found.")
             return
 
         # Identify orphaned devices (Meraki in NetBox but not in dashboard), skipping Inventory
@@ -79,6 +79,6 @@ class TagOrphanedMerakiDevices(Script):
             updated += 1
 
         if updated:
-            self.log_success(f"✅ {updated} orphaned Meraki device(s) tagged and set to Offline.")
+            self.log_success(f"{updated} orphaned Meraki device(s) tagged and set to Offline.")
         else:
-            self.log_info("ℹ️ No orphaned Meraki devices found (excluding 'Inventory').")
+            self.log_info("ℹNo orphaned Meraki devices found (excluding 'Inventory').")
