@@ -40,11 +40,11 @@ class MerakiInventoryReport(Script):
         try:
             orgs = requests.get("https://api.meraki.com/api/v1/organizations", headers=headers).json()
             if not orgs or "id" not in orgs[0]:
-                self.log_failure("❌ No organizations found from Meraki API.")
+                self.log_failure("No organizations found from Meraki API.")
                 return
             org_id = orgs[0]["id"]
         except Exception as e:
-            self.log_failure(f"❌ Error fetching organizations: {str(e)}")
+            self.log_failure(f"Error fetching organizations: {str(e)}")
             return
 
         try:
@@ -52,13 +52,13 @@ class MerakiInventoryReport(Script):
                 f"https://api.meraki.com/api/v1/organizations/{org_id}/devices", headers=headers
             ).json()
         except Exception as e:
-            self.log_failure(f"❌ Error fetching Meraki devices: {str(e)}")
+            self.log_failure(f"Error fetching Meraki devices: {str(e)}")
             return
 
         try:
             meraki_manufacturer = Manufacturer.objects.get(name="Cisco Meraki")
         except Manufacturer.DoesNotExist:
-            self.log_failure("❌ Manufacturer 'Cisco Meraki' not found in NetBox.")
+            self.log_failure("Manufacturer 'Cisco Meraki' not found in NetBox.")
             return
 
         total_devices = len(devices)
@@ -110,26 +110,26 @@ class MerakiInventoryReport(Script):
 
         # Build human-readable summary
         output_lines = [
-            f"📦 Total Meraki Devices Found in Dashboard: {total_devices}",
-            f"✅ Devices Importable to NetBox: {importable_count}",
-            f"⛔ Devices Skipped (duplicate or missing info): {skipped_count}",
-            f"🧩 Orphaned Devices in NetBox (not in Meraki): {len(orphaned_serials)}",
+            f"Total Meraki Devices Found in Dashboard: {total_devices}",
+            f"Devices Importable to NetBox: {importable_count}",
+            f"Devices Skipped (duplicate or missing info): {skipped_count}",
+            f"Orphaned Devices in NetBox (not in Meraki): {len(orphaned_serials)}",
             "",
-            "📊 Device Counts by Model:"
+            "Device Counts by Model:"
         ]
 
         for model, count in model_counter.items():
             output_lines.append(f" - {model}: {count}")
 
         if data["show_import_eval"]:
-            output_lines.append("\n✅ Devices That Would Be Imported:")
+            output_lines.append("\nDevices That Would Be Imported:")
             output_lines.extend(importable_devices or ["(None)"])
 
-            output_lines.append("\n⛔ Devices That Would Be Skipped:")
+            output_lines.append("\nDevices That Would Be Skipped:")
             output_lines.extend(skipped_devices or ["(None)"])
 
         if data["show_orphaned"]:
-            output_lines.append("\n🧾 Orphaned Devices in NetBox:")
+            output_lines.append("\nOrphaned Devices in NetBox:")
             output_lines.extend(orphaned_serials or ["(None)"])
 
         return "\n".join(output_lines)
