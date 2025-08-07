@@ -3,6 +3,7 @@ from dcim.models import Device, Manufacturer, DeviceType, DeviceRole, Site
 from ipam.models import IPAddress
 from extras.models import CustomField
 import requests
+from datetime import datetime, timedelta
 
 
 class VerifyMerakiData(Script):
@@ -76,9 +77,27 @@ class VerifyMerakiData(Script):
             if nb_device.asset_tag != dev.get("mac", ""):
                 mismatches.append(f"Asset tag mismatch for {serial}: NB='{nb_device.asset_tag}', Meraki='{dev.get('mac', '')}'")
 
-            # Status must not be offline or inventory
-            if nb_device.status in ["offline", "inventory"]:
-                mismatches.append(f"Status issue for {serial}: NB Status='{nb_device.status}'")
+            # Enhanced status validation
+            last_seen_str = dev.get("lastReportedAt")
+            if last_seen_str:
+                try:
+                    last_seen = datetime.fromisoformat(last_seen_str.replace("Z", "+00:00"))
+                    now = datetime.utcnow().replace(tzinfo=last_seen.tzinfo)
+                    inactive_duration = now - last_seen
+
+                    if inactive_duration > timedelta(days=60):
+                        expected_status = "inventory"
+                    else:
+                        expected_status = "offline"
+
+                    if nb_device.status != expected_status:
+                        mismatches.append(
+                            f"Status mismatch for {serial}: NB='{nb_device.status}', Expected='{expected_status}' (Last seen: {last_seen.date()})"
+                        )
+                except Exception as e:
+                    mismatches.append(f"Error parsing lastReportedAt for {serial}: {e}")
+            else:
+                mismatches.append(f"Missing lastReportedAt for {serial}, cannot validate status.")
 
             # IP match
             expected_ip = dev.get("wanIp") if dev.get("model", "").startswith("MX") else dev.get("lanIp")
