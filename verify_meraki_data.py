@@ -1,7 +1,6 @@
 from extras.scripts import Script, StringVar
 from dcim.models import Device, Manufacturer, DeviceType, DeviceRole, Site
 from ipam.models import IPAddress
-from extras.models import CustomField
 from extras.models import Tag
 import requests
 from datetime import datetime, timedelta
@@ -15,7 +14,7 @@ class VerifyMerakiData(Script):
 
     class Meta:
         name = "Verify Meraki Device Data"
-        description = "Validates Meraki device data against NetBox records."
+        description = "Validates Meraki device data against NetBox records and syncs mismatch tags."
         field_order = ["api_key"]
 
     def run(self, data, commit):
@@ -113,15 +112,19 @@ class VerifyMerakiData(Script):
                     expected_status = "offline"
 
             # Compare NetBox status with expected
+            status_mismatch = False
             if nb_device.status != expected_status:
-                # Exception: inventory is acceptable when expected is offline
                 if not (nb_device.status == "inventory" and expected_status == "offline"):
+                    status_mismatch = True
                     mismatches.append(
                         f"Status mismatch for {serial}: NB='{nb_device.status}', Meraki='{meraki_status}', Expected='{expected_status}'"
                     )
                     if commit:
                         nb_device.tags.add(status_tag)
-                        nb_device.save()
+            else:
+                # Status matches — remove tag if present
+                if commit and status_tag in nb_device.tags.all():
+                    nb_device.tags.remove(status_tag)
 
             # IP match
             expected_ip = dev.get("wanIp") if dev.get("model", "").startswith("MX") else dev.get("lanIp")
@@ -131,14 +134,22 @@ class VerifyMerakiData(Script):
             # Firmware match
             expected_fw = dev.get("firmware", "")
             actual_fw = nb_device.custom_field_data.get("lindab_firmware_ver", "")
-            if expected_fw and actual_fw != expected_fw:
+            firmware_mismatch = expected_fw and actual_fw != expected_fw
+
+            if firmware_mismatch:
                 mismatches.append(f"Firmware mismatch for {serial}: NB='{actual_fw}', Meraki='{expected_fw}'")
                 if commit:
                     nb_device.tags.add(firmware_tag)
-                    nb_device.save()
+            else:
+                # Firmware matches — remove tag if present
+                if commit and firmware_tag in nb_device.tags.all():
+                    nb_device.tags.remove(firmware_tag)
+
+            if commit:
+                nb_device.save()
 
         if not mismatches:
-            return "All Meraki device records match NetBox."
+            return "✅ All Meraki device records match NetBox."
 
         return "\n".join(mismatches)
 
