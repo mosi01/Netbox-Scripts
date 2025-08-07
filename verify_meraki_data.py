@@ -23,7 +23,7 @@ class VerifyMerakiData(Script):
             "Accept": "application/json"
         }
 
-        # 1. Fetch org
+        # 1. Fetch organization
         orgs = requests.get("https://api.meraki.com/api/v1/organizations", headers=headers).json()
         if not orgs or not orgs[0].get("id"):
             self.log_failure("❌ No organization found.")
@@ -40,6 +40,12 @@ class VerifyMerakiData(Script):
         devices = requests.get(
             f"https://api.meraki.com/api/v1/organizations/{org_id}/devices", headers=headers
         ).json()
+
+        # 4. Fetch Meraki device statuses (includes lastReportedAt)
+        statuses = requests.get(
+            f"https://api.meraki.com/api/v1/organizations/{org_id}/devices/statuses", headers=headers
+        ).json()
+        status_map = {s["serial"]: s for s in statuses if "serial" in s}
 
         mismatches = []
         manufacturer = Manufacturer.objects.filter(name="Cisco Meraki").first()
@@ -77,8 +83,9 @@ class VerifyMerakiData(Script):
             if nb_device.asset_tag != dev.get("mac", ""):
                 mismatches.append(f"Asset tag mismatch for {serial}: NB='{nb_device.asset_tag}', Meraki='{dev.get('mac', '')}'")
 
-            # Enhanced status validation
-            last_seen_str = dev.get("lastReportedAt")
+            # Enhanced status validation using lastReportedAt
+            status_info = status_map.get(serial)
+            last_seen_str = status_info.get("lastReportedAt") if status_info else None
             if last_seen_str:
                 try:
                     last_seen = datetime.fromisoformat(last_seen_str.replace("Z", "+00:00"))
