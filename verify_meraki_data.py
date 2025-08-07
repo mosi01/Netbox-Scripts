@@ -41,7 +41,7 @@ class VerifyMerakiData(Script):
             f"https://api.meraki.com/api/v1/organizations/{org_id}/devices", headers=headers
         ).json()
 
-        # 4. Fetch Meraki device statuses (includes lastReportedAt)
+        # 4. Fetch Meraki device statuses
         statuses = requests.get(
             f"https://api.meraki.com/api/v1/organizations/{org_id}/devices/statuses", headers=headers
         ).json()
@@ -69,7 +69,7 @@ class VerifyMerakiData(Script):
             if nb_device.device_type.model != dev.get("model", ""):
                 mismatches.append(f"Model mismatch for {serial}: NB='{nb_device.device_type.model}', Meraki='{dev.get('model', '')}'")
 
-            # Match site via networkId → network.name → Site.name
+            # Match site
             meraki_network_name = network_map.get(dev.get("networkId"), "")
             if not nb_device.site or nb_device.site.name != meraki_network_name:
                 mismatches.append(f"Site mismatch for {serial}: NB='{nb_device.site.name if nb_device.site else 'None'}', Meraki='{meraki_network_name}'")
@@ -83,35 +83,41 @@ class VerifyMerakiData(Script):
             if nb_device.asset_tag != dev.get("mac", ""):
                 mismatches.append(f"Asset tag mismatch for {serial}: NB='{nb_device.asset_tag}', Meraki='{dev.get('mac', '')}'")
 
-            # Enhanced status validation using lastReportedAt
+            # ✅ Enhanced status validation
             status_info = status_map.get(serial)
+            meraki_status = status_info.get("status") if status_info else None
             last_seen_str = status_info.get("lastReportedAt") if status_info else None
-            if last_seen_str:
-                try:
-                    last_seen = datetime.fromisoformat(last_seen_str.replace("Z", "+00:00"))
-                    now = datetime.utcnow().replace(tzinfo=last_seen.tzinfo)
-                    inactive_duration = now - last_seen
 
-                    if inactive_duration > timedelta(days=60):
-                        expected_status = "inventory"
-                    else:
-                        expected_status = "offline"
+            expected_status = "active"  # Default assumption
 
-                    if nb_device.status != expected_status:
-                        mismatches.append(
-                            f"Status mismatch for {serial}: NB='{nb_device.status}', Expected='{expected_status}' (Last seen: {last_seen.date()})"
-                        )
-                except Exception as e:
-                    mismatches.append(f"Error parsing lastReportedAt for {serial}: {e}")
-            else:
-                mismatches.append(f"Missing lastReportedAt for {serial}, cannot validate status.")
+            if meraki_status in ["offline", "dormant"]:
+                if last_seen_str:
+                    try:
+                        last_seen = datetime.fromisoformat(last_seen_str.replace("Z", "+00:00"))
+                        now = datetime.utcnow().replace(tzinfo=last_seen.tzinfo)
+                        inactive_duration = now - last_seen
+
+                        if inactive_duration > timedelta(days=60):
+                            expected_status = "inventory"
+                        else:
+                            expected_status = "offline"
+                    except Exception as e:
+                        mismatches.append(f"Error parsing lastReportedAt for {serial}: {e}")
+                        continue
+                else:
+                    expected_status = "offline"
+
+            if nb_device.status != expected_status:
+                mismatches.append(
+                    f"Status mismatch for {serial}: NB='{nb_device.status}', Meraki='{meraki_status}', Expected='{expected_status}'"
+                )
 
             # IP match
             expected_ip = dev.get("wanIp") if dev.get("model", "").startswith("MX") else dev.get("lanIp")
             if nb_device.primary_ip and str(nb_device.primary_ip.address).split("/")[0] != expected_ip:
                 mismatches.append(f"IP mismatch for {serial}: NB='{nb_device.primary_ip}', Meraki='{expected_ip}'")
 
-            # Firmware match (custom field)
+            # Firmware match
             expected_fw = dev.get("firmware", "")
             actual_fw = nb_device.custom_field_data.get("lindab_firmware_ver", "")
             if expected_fw and actual_fw != expected_fw:
