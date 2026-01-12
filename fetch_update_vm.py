@@ -2,7 +2,6 @@
 from extras.scripts import Script
 import paramiko
 import winrm
-import io
 import json
 
 class FetchAndUpdateVMResources(Script):
@@ -43,13 +42,11 @@ class FetchAndUpdateVMResources(Script):
                 self.log_failure(f"Could not reach VM: {hostname}")
                 continue
 
-            # Parse and update VM in NetBox
             try:
                 vcpus = self.extract_cpu_count(vm_data)
                 memory_mb = self.extract_memory(vm_data)
                 disk_gb = self.extract_disk_size(vm_data)
 
-                # Only update if values differ
                 changes = []
                 if vm.vcpus != vcpus:
                     vm.vcpus = vcpus
@@ -77,7 +74,6 @@ class FetchAndUpdateVMResources(Script):
         return VirtualMachine.objects.all()
 
     def fetch_vm_data(self, target, username, password):
-        # Try Linux first
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -89,7 +85,6 @@ class FetchAndUpdateVMResources(Script):
         except:
             pass
 
-        # Try Windows
         try:
             session = winrm.Session(target, auth=(username, password))
             cpu_info = session.run_cmd("wmic cpu get NumberOfLogicalProcessors").std_out.decode().strip().split("\n")[1:]
@@ -113,9 +108,9 @@ class FetchAndUpdateVMResources(Script):
             for line in vm_data["Raw"]:
                 if "Mem:" in line or "total" in line:
                     parts = line.split()
-                    return int(parts[1])  # Memory in MB
+                    return int(parts[1])
         elif vm_data["OS"] == "Windows":
-            return int(vm_data["Memory"][0].strip()) // 1024  # Convert KB to MB
+            return int(vm_data["Memory"][0].strip()) // 1024
         return 0
 
     def extract_disk_size(self, vm_data):
