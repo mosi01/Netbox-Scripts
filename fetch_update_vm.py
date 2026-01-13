@@ -60,87 +60,103 @@ class FetchAndUpdateVMResources(Script):
         # Normal mode: process all VMs in parallel
         vms = self.get_vms()
         self.log_info(f"Found {len(vms)} virtual machines to process using {threads} threads.")
-
         futures = []
         with ThreadPoolExecutor(max_workers=threads) as executor:
             for vm in vms:
                 futures.append(executor.submit(self.process_vm, vm, win_domain, win_user, win_pass, linux_user, linux_pass, domains, commit))
-
             for future in as_completed(futures):
                 result = future.result()
                 if result["status"] == "success":
                     success_count += 1
+                    self.log_info(result["message"])  # Detailed success message
                 else:
                     failure_count += 1
                     failed_vms.append(result["hostname"])
+                    self.log_failure(result["message"])  # Detailed failure message
 
         # Summary
-        self.log_info("---------------------------------------------------")
+        self.log_info("------------------------------------------------------------")
         self.log_info(f"Summary: {success_count} VMs succeeded, {failure_count} VMs failed.")
         if failed_vms:
             self.log_info("Failed VMs: " + ", ".join(failed_vms))
-        self.log_info("---------------------------------------------------")
+        self.log_info("------------------------------------------------------------")
 
     def try_windows_then_linux(self, target, win_domain, win_user, win_pass, linux_user, linux_pass):
+        self.log_info(f"Attempting Windows connection to {target}")
         vm_data = self.fetch_windows_data(target, win_domain, win_user, win_pass)
         if vm_data:
+            self.log_info(f"Windows connection successful for {target}")
             return vm_data
+        self.log_failure(f"Windows connection failed for {target}")
         if linux_user and linux_pass:
-            return self.fetch_linux_data(target, linux_user, linux_pass)
+            self.log_info(f"Attempting Linux SSH connection to {target}")
+            vm_data = self.fetch_linux_data(target, linux_user, linux_pass)
+            if vm_data:
+                self.log_info(f"Linux SSH connection successful for {target}")
+                return vm_data
+            self.log_failure(f"Linux SSH connection failed for {target}")
         return None
 
     def process_vm(self, vm, win_domain, win_user, win_pass, linux_user, linux_pass, domains, commit):
         hostname = vm.name
         ip = str(vm.primary_ip.address.ip) if vm.primary_ip else None
+        self.log_info(f"Processing VM: {hostname}")
         vm_data = None
 
+        # Try Windows first
         if ip:
+            self.log_info(f"Trying Windows connection via IP: {ip}")
             vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
+
+        # Try FQDN if IP fails
         if not vm_data and not ip:
             for domain in domains:
                 fqdn = f"{hostname}.{domain}"
+                self.log_info(f"Trying Windows connection via FQDN: {fqdn}")
                 vm_data = self.fetch_windows_data(fqdn, win_domain, win_user, win_pass)
                 if vm_data:
                     break
 
+        # Try Linux if Windows fails
         if not vm_data and linux_user and linux_pass:
             if ip:
+                self.log_info(f"Trying Linux SSH via IP: {ip}")
                 vm_data = self.fetch_linux_data(ip, linux_user, linux_pass)
             if not vm_data and not ip:
                 for domain in domains:
                     fqdn = f"{hostname}.{domain}"
+                    self.log_info(f"Trying Linux SSH via FQDN: {fqdn}")
                     vm_data = self.fetch_linux_data(fqdn, linux_user, linux_pass)
                     if vm_data:
                         break
 
         if not vm_data:
-            return {"status": "fail", "hostname": hostname}
+            return {"status": "fail", "hostname": hostname, "message": f"FAILURE: Could not fetch data for VM {hostname}"}
 
         try:
             vcpus = self.extract_cpu_count(vm_data)
             memory_mb = self.extract_memory(vm_data)
             disks = self.extract_disks(vm_data)
-
+            disk_details = ", ".join([f"{self.format_disk_name(hostname, name)}: {size}GB" for name, size in disks.items()])
             if commit:
                 self.update_netbox_vm(vm, vcpus, memory_mb, disks)
-            return {"status": "success", "hostname": hostname}
-        except Exception:
-            return {"status": "fail", "hostname": hostname}
+            return {
+                "status": "success",
+                "hostname": hostname,
+                "message": f"SUCCESS: {hostname} retrieved: vCPUs={vcpus}, Memory={memory_mb}MB, Disks: {disk_details}"
+            }
+        except Exception as e:
+            return {"status": "fail", "hostname": hostname, "message": f"Error updating VM {hostname}: {str(e)}"}
 
     def update_netbox_vm(self, vm, vcpus, memory_mb, disks):
         from virtualization.models import VirtualDisk
-        changes = []
         if vm.vcpus != vcpus:
             vm.vcpus = vcpus
-            changes.append(f"vCPUs={vcpus}")
         if vm.memory != memory_mb:
             vm.memory = memory_mb
-            changes.append(f"Memory={memory_mb}MB")
         vm.save()
-
         existing_disks = {d.name: d for d in VirtualDisk.objects.filter(virtual_machine=vm)}
         new_disk_names = []
-
         for name, size in disks.items():
             disk_label = self.format_disk_name(vm.name, name)
             new_disk_names.append(disk_label)
@@ -151,7 +167,6 @@ class FetchAndUpdateVMResources(Script):
                     disk_obj.save()
             else:
                 VirtualDisk.objects.create(virtual_machine=vm, name=disk_label, size=int(size))
-
         for old_disk_name in existing_disks.keys():
             if old_disk_name not in new_disk_names:
                 existing_disks[old_disk_name].delete()
@@ -160,10 +175,8 @@ class FetchAndUpdateVMResources(Script):
         vcpus = self.extract_cpu_count(vm_data)
         memory_mb = self.extract_memory(vm_data)
         disks = self.extract_disks(vm_data)
-        self.log_info(f"Fetched data for {hostname}: vCPUs={vcpus}, Memory={memory_mb}MB")
-        self.log_info("Disks:")
-        for name, size in disks.items():
-            self.log_info(f"- {self.format_disk_name(hostname, name)}: {size}GB")
+        disk_details = ", ".join([f"{self.format_disk_name(hostname, name)}: {size}GB" for name, size in disks.items()])
+        self.log_info(f"Fetched data for {hostname}: vCPUs={vcpus}, Memory={memory_mb}MB, Disks: {disk_details}")
 
     def get_vms(self):
         from virtualization.models import VirtualMachine
@@ -178,7 +191,8 @@ class FetchAndUpdateVMResources(Script):
             output = stdout.read().decode().strip().split("\n")
             ssh.close()
             return {"OS": "Linux", "Raw": output}
-        except:
+        except Exception as e:
+            self.log_failure(f"Could not establish SSH connection to: {target}. Error: {str(e)}")
             return None
 
     def fetch_windows_data(self, target, domain, username, password):
@@ -189,7 +203,8 @@ class FetchAndUpdateVMResources(Script):
             mem_info = session.run_cmd("wmic OS get TotalVisibleMemorySize").std_out.decode().strip().split("\n")[1:]
             disk_info_raw = session.run_cmd("wmic logicaldisk get size,caption").std_out.decode().strip().split("\n")[1:]
             return {"OS": "Windows", "CPU": cpu_info, "Memory": mem_info, "Disks": disk_info_raw}
-        except:
+        except Exception as e:
+            self.log_failure(f"Could not establish WinRM connection to: {target}. Error: {str(e)}")
             return None
 
     def extract_cpu_count(self, vm_data):
