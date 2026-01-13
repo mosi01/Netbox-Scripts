@@ -7,7 +7,7 @@ import winrm
 class FetchAndUpdateVMResources(Script):
     linux_username = StringVar(description="Linux Username")
     linux_password = StringVar(description="Linux Password", widget=PasswordInput)
-    windows_domain = StringVar(description="Windows Domain (e.g. contoso.com)")
+    windows_domain = StringVar(description="Windows Domain (e.g. se.lindab.com)")
     windows_username = StringVar(description="Windows Username")
     windows_password = StringVar(description="Windows Password", widget=PasswordInput)
     domain_suffixes = StringVar(description="Domain suffixes for Windows (semicolon-separated, e.g. contoso.com;domain.com)")
@@ -49,9 +49,9 @@ class FetchAndUpdateVMResources(Script):
             self.log_info(f"Trying SSH on {single_target} with Linux credentials...")
             vm_data = self.fetch_linux_data(single_target, linux_user, linux_pass)
 
-            # If Linux failed, try Windows
+            # If Linux failed, try Windows with NTLM
             if not vm_data:
-                self.log_info(f"Trying WinRM on {single_target} with Windows credentials ({win_user}@{win_domain})...")
+                self.log_info(f"Trying WinRM (NTLM) on {single_target} with Windows credentials ({win_user}@{win_domain})...")
                 vm_data = self.fetch_windows_data(single_target, win_domain, win_user, win_pass)
 
             if not vm_data:
@@ -91,14 +91,14 @@ class FetchAndUpdateVMResources(Script):
                     if vm_data:
                         break
 
-            # If Linux failed, try Windows
+            # If Linux failed, try Windows with NTLM
             if not vm_data and ip:
-                self.log_info(f"Trying WinRM on {ip} with Windows credentials ({win_user}@{win_domain})...")
+                self.log_info(f"Trying WinRM (NTLM) on {ip} with Windows credentials ({win_user}@{win_domain})...")
                 vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
             if not vm_data and not ip:
                 for domain in domains:
                     fqdn = f"{hostname}.{domain}"
-                    self.log_info(f"Trying WinRM on {fqdn} with Windows credentials ({win_user}@{win_domain})...")
+                    self.log_info(f"Trying WinRM (NTLM) on {fqdn} with Windows credentials ({win_user}@{win_domain})...")
                     vm_data = self.fetch_windows_data(fqdn, win_domain, win_user, win_pass)
                     if vm_data:
                         break
@@ -167,13 +167,13 @@ class FetchAndUpdateVMResources(Script):
     def fetch_windows_data(self, target, domain, username, password):
         try:
             full_user = f"{username}@{domain}"
-            session = winrm.Session(target, auth=(full_user, password))
+            session = winrm.Session(target, auth=(full_user, password), transport='ntlm')
             cpu_info = session.run_cmd("wmic cpu get NumberOfLogicalProcessors").std_out.decode().strip().split("\n")[1:]
             mem_info = session.run_cmd("wmic OS get TotalVisibleMemorySize").std_out.decode().strip().split("\n")[1:]
             disk_info_raw = session.run_cmd("wmic logicaldisk get size,freespace,caption").std_out.decode().strip().split("\n")[1:]
             return {"OS": "Windows", "CPU": cpu_info, "Memory": mem_info, "Disks": disk_info_raw}
         except Exception as e:
-            self.log_info(f"WinRM connection failed for {target}: {e}")
+            self.log_info(f"WinRM (NTLM) connection failed for {target}: {e}")
             return None
 
     def extract_cpu_count(self, vm_data):
