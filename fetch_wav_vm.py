@@ -4,7 +4,7 @@ import winrm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class CheckWindowsAntivirusStatus(Script):
-    windows_domain = StringVar(description="Windows Domain (e.g. domain.com)")
+    windows_domain = StringVar(description="Windows Domain (e.g. se.lindab.com)")
     windows_username = StringVar(description="Windows Username")
     windows_password = StringVar(description="Windows Password", widget=PasswordInput)
     domain_suffixes = StringVar(description="Domain suffixes for Windows (semicolon-separated, e.g. contoso.com;domain.com)")
@@ -42,19 +42,19 @@ class CheckWindowsAntivirusStatus(Script):
         # Single VM mode
         if test_single and single_target:
             self.log_info(f"[{single_target}] Testing single VM")
-            status, error_msg = self.check_antivirus_services(single_target, win_domain, win_user, win_pass)
+            status, details, error_msg = self.check_antivirus_services(single_target, win_domain, win_user, win_pass)
             if status is None:
                 self.log_failure(f"[{single_target}] {error_msg}")
                 failure_results.append({"hostname": single_target, "error": error_msg})
             else:
-                self.log_info(f"[{single_target}] Antivirus Active: {status}")
+                self.log_info(f"[{single_target}] Antivirus Active: {status} | {details}")
                 if commit:
                     vm_obj = self.get_vm_by_name(single_target)
                     if vm_obj:
                         self.update_netbox_vm(vm_obj, status)
                     else:
                         self.log_failure(f"[{single_target}] Could not find VM in NetBox for update")
-                success_results.append({"hostname": single_target, "antivirus": status})
+                success_results.append({"hostname": single_target, "antivirus": status, "details": details})
             return "\n".join(self.generate_csv(success_results, failure_results))
 
         # Normal mode: process all VMs in parallel
@@ -76,11 +76,11 @@ class CheckWindowsAntivirusStatus(Script):
         return "\n".join(self.generate_csv(success_results, failure_results))
 
     def generate_csv(self, success_results, failure_results):
-        csv_lines = ["Hostname;Antivirus Active;Error"]
+        csv_lines = ["Hostname;Antivirus Active;Details;Error"]
         for s in success_results:
-            csv_lines.append(f"{s['hostname']};{s['antivirus']};")
+            csv_lines.append(f"{s['hostname']};{s['antivirus']};{s['details']};")
         for f in failure_results:
-            csv_lines.append(f"{f['hostname']};;{f['error']}")
+            csv_lines.append(f"{f['hostname']};;;{f['error']}")
         return csv_lines
 
     def check_antivirus_services(self, target, domain, username, password):
@@ -89,40 +89,51 @@ class CheckWindowsAntivirusStatus(Script):
             session = winrm.Session(target, auth=(full_user, password), transport='ntlm')
             ps_script = """
             $services = @('WinDefend','WdNisSvc','Sense')
-            $running = 0
             foreach ($svc in $services) {
-                $status = (Get-Service -Name $svc).Status
-                if ($status -eq 'Running') { $running++ }
+                try {
+                    $status = (Get-Service -Name $svc -ErrorAction SilentlyContinue).Status
+                    if ($status) {
+                        Write-Output "$svc=$status"
+                    } else {
+                        Write-Output "$svc=NotInstalled"
+                    }
+                } catch {
+                    Write-Output "$svc=NotInstalled"
+                }
             }
-            Write-Output $running
             """
             result = session.run_ps(ps_script)
-            count = int(result.std_out.decode().strip())
-            if count == 3:
-                return True, ""
-            else:
-                return False, ""
+            output = result.std_out.decode().strip().split("\n")
+            running_count = 0
+            details = []
+            for line in output:
+                svc, status = line.split("=")
+                details.append(f"{svc}:{status}")
+                if status.lower() == "running":
+                    running_count += 1
+            return (True if running_count == 3 else False), ", ".join(details), ""
         except Exception as e:
-            return None, f"WinRM connection failed: {str(e)}"
+            return None, "", f"WinRM connection failed: {str(e)}"
 
     def process_vm(self, vm, win_domain, win_user, win_pass, domains, commit):
         hostname = vm.name
         ip = str(vm.primary_ip.address.ip) if vm.primary_ip else None
         self.log_info(f"[{hostname}] Processing VM")
         status = None
+        details = ""
         error_msg = ""
 
         # Try IP first
         if ip:
             self.log_info(f"[{hostname}] Trying Windows via IP: {ip}")
-            status, error_msg = self.check_antivirus_services(ip, win_domain, win_user, win_pass)
+            status, details, error_msg = self.check_antivirus_services(ip, win_domain, win_user, win_pass)
 
         # Try FQDN if IP fails
         if status is None and not ip:
             for domain in domains:
                 fqdn = f"{hostname}.{domain}"
                 self.log_info(f"[{hostname}] Trying Windows via FQDN: {fqdn}")
-                status, error_msg = self.check_antivirus_services(fqdn, win_domain, win_user, win_pass)
+                status, details, error_msg = self.check_antivirus_services(fqdn, win_domain, win_user, win_pass)
                 if status is not None:
                     break
 
@@ -136,8 +147,9 @@ class CheckWindowsAntivirusStatus(Script):
                 "status": "success",
                 "hostname": hostname,
                 "antivirus": status,
+                "details": details,
                 "error": "",
-                "message": f"[{hostname}] SUCCESS: Antivirus Active = {status}"
+                "message": f"[{hostname}] SUCCESS: Antivirus Active = {status} | {details}"
             }
         except Exception as e:
             return {"status": "fail", "hostname": hostname, "error": f"Update error: {str(e)}", "message": f"[{hostname}] Error updating VM: {str(e)}"}
