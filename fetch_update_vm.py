@@ -1,4 +1,3 @@
-
 from extras.scripts import Script, StringVar, BooleanVar
 from django.forms.widgets import PasswordInput
 import paramiko
@@ -61,8 +60,13 @@ class FetchAndUpdateVMResources(Script):
             try:
                 vcpus = self.extract_cpu_count(vm_data)
                 memory_mb = self.extract_memory(vm_data)
-                disk_gb = self.extract_disk_size(vm_data)
-                self.log_info(f"Fetched data: vCPUs={vcpus}, Memory={memory_mb}MB, Disk={disk_gb}GB")
+                disks = self.extract_disks(vm_data)
+
+                self.log_info(f"Fetched data: vCPUs={vcpus}, Memory={memory_mb}MB")
+                self.log_info("Disks found:")
+                for name, size in disks.items():
+                    disk_label = self.format_disk_name(single_target, name)
+                    self.log_info(f"- {disk_label}: {size}GB")
             except Exception as e:
                 self.log_failure(f"Error processing VM '{single_target}': {e}")
             return
@@ -70,6 +74,8 @@ class FetchAndUpdateVMResources(Script):
         # Normal mode: process all VMs
         vms = self.get_vms()
         self.log_info(f"Found {len(vms)} virtual machines to process.")
+
+        from virtualization.models import VirtualDisk
 
         for vm in vms:
             ip = str(vm.primary_ip.address.ip) if vm.primary_ip else None
@@ -112,8 +118,15 @@ class FetchAndUpdateVMResources(Script):
             try:
                 vcpus = self.extract_cpu_count(vm_data)
                 memory_mb = self.extract_memory(vm_data)
-                disk_gb = self.extract_disk_size(vm_data)
+                disks = self.extract_disks(vm_data)
 
+                self.log_info(f"Fetched data: vCPUs={vcpus}, Memory={memory_mb}MB")
+                self.log_info("Disks found:")
+                for name, size in disks.items():
+                    disk_label = self.format_disk_name(hostname, name)
+                    self.log_info(f"- {disk_label}: {size}GB")
+
+                # Update VM and disks in NetBox
                 changes = []
                 if vm.vcpus != vcpus:
                     vm.vcpus = vcpus
@@ -121,18 +134,36 @@ class FetchAndUpdateVMResources(Script):
                 if vm.memory != memory_mb:
                     vm.memory = memory_mb
                     changes.append(f"Memory={memory_mb}MB")
-                if vm.disk != disk_gb:
-                    vm.disk = disk_gb
-                    changes.append(f"Disk={disk_gb}GB")
 
-                if changes:
-                    if commit:
-                        vm.save()
-                        self.log_success(f"Updated VM '{hostname}': " + ", ".join(changes))
-                    else:
-                        self.log_info(f"Dry run: Would update VM '{hostname}' with: " + ", ".join(changes))
+                if commit:
+                    vm.save()
+
+                    # Handle disks: add/update/remove
+                    existing_disks = {d.name: d for d in VirtualDisk.objects.filter(virtual_machine=vm)}
+                    new_disk_names = []
+
+                    for name, size in disks.items():
+                        disk_label = self.format_disk_name(hostname, name)
+                        new_disk_names.append(disk_label)
+                        if disk_label in existing_disks:
+                            disk_obj = existing_disks[disk_label]
+                            if disk_obj.size != int(size):
+                                disk_obj.size = int(size)
+                                disk_obj.save()
+                                self.log_info(f"Updated disk '{disk_label}' size to {size}GB")
+                        else:
+                            VirtualDisk.objects.create(virtual_machine=vm, name=disk_label, size=int(size))
+                            self.log_info(f"Created disk '{disk_label}' with size {size}GB")
+
+                    # Remove disks that no longer exist
+                    for old_disk_name in existing_disks.keys():
+                        if old_disk_name not in new_disk_names:
+                            existing_disks[old_disk_name].delete()
+                            self.log_info(f"Deleted disk '{old_disk_name}' (no longer present on VM)")
+
+                    self.log_success(f"Updated VM '{hostname}': " + ", ".join(changes))
                 else:
-                    self.log_info(f"No changes needed for VM '{hostname}'")
+                    self.log_info(f"Dry run: Would update VM '{hostname}' and disks: " + ", ".join([f"{self.format_disk_name(hostname, n)}={s}GB" for n, s in disks.items()]))
 
                 success_count += 1
             except Exception as e:
@@ -170,7 +201,7 @@ class FetchAndUpdateVMResources(Script):
             session = winrm.Session(target, auth=(full_user, password), transport='ntlm')
             cpu_info = session.run_cmd("wmic cpu get NumberOfLogicalProcessors").std_out.decode().strip().split("\n")[1:]
             mem_info = session.run_cmd("wmic OS get TotalVisibleMemorySize").std_out.decode().strip().split("\n")[1:]
-            disk_info_raw = session.run_cmd("wmic logicaldisk get size,freespace,caption").std_out.decode().strip().split("\n")[1:]
+            disk_info_raw = session.run_cmd("wmic logicaldisk get size,caption").std_out.decode().strip().split("\n")[1:]
             return {"OS": "Windows", "CPU": cpu_info, "Memory": mem_info, "Disks": disk_info_raw}
         except Exception as e:
             self.log_info(f"WinRM (NTLM) connection failed for {target}: {e}")
@@ -195,17 +226,23 @@ class FetchAndUpdateVMResources(Script):
             return int(vm_data["Memory"][0].strip()) // 1024
         return 0
 
-    def extract_disk_size(self, vm_data):
-        total_size_gb = 0
+    def extract_disks(self, vm_data):
+        disks = {}
         if vm_data["OS"] == "Linux":
             for line in vm_data["Raw"]:
-                if "disk" in line or "part" in line:
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[1].isdigit():
-                        total_size_gb += int(parts[1]) / (1024**3)
+                parts = line.split()
+                if len(parts) >= 3 and parts[2] == "disk":
+                    name = parts[0]
+                    size_gb = round(int(parts[1]) / (1024**3), 2)
+                    disks[name] = size_gb
         elif vm_data["OS"] == "Windows":
             for line in vm_data["Disks"]:
                 parts = line.split()
-                if len(parts) >= 3 and parts[2].isdigit():
-                    total_size_gb += int(parts[2]) / (1024**3)
-        return round(total_size_gb, 2)
+                if len(parts) >= 2 and parts[1].isdigit():
+                    name = parts[0].replace(":", "")  # Remove colon from C:, D:
+                    size_gb = round(int(parts[1]) / (1024**3), 2)
+                    disks[name] = size_gb
+        return disks
+
+    def format_disk_name(self, hostname, disk_name):
+        return f"VD-{hostname}-disk{disk_name}"
