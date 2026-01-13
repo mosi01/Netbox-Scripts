@@ -1,8 +1,8 @@
+
 from extras.scripts import Script, StringVar
 from django.forms.widgets import PasswordInput
 import paramiko
 import winrm
-import json
 
 class FetchAndUpdateVMResources(Script):
     ad_username = StringVar(description="Service Account Username")
