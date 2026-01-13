@@ -1,3 +1,4 @@
+
 from extras.scripts import Script, StringVar
 from django.forms.widgets import PasswordInput
 import paramiko
@@ -31,6 +32,9 @@ class FetchAndUpdateVMResources(Script):
         vms = self.get_vms()
         self.log_info(f"Found {len(vms)} virtual machines to process.")
 
+        success_count = 0
+        failure_count = 0
+
         for vm in vms:
             ip = vm.primary_ip.address if vm.primary_ip else None
             hostname = vm.name
@@ -41,10 +45,12 @@ class FetchAndUpdateVMResources(Script):
 
             # Try Linux first
             if ip:
+                self.log_info(f"Trying SSH on {ip} with Linux credentials...")
                 vm_data = self.fetch_linux_data(ip, linux_user, linux_pass)
             else:
                 for domain in domains:
                     fqdn = f"{hostname}.{domain}"
+                    self.log_info(f"Trying SSH on {fqdn} with Linux credentials...")
                     vm_data = self.fetch_linux_data(fqdn, linux_user, linux_pass)
                     if vm_data:
                         break
@@ -52,16 +58,19 @@ class FetchAndUpdateVMResources(Script):
             # If Linux failed, try Windows
             if not vm_data:
                 if ip:
+                    self.log_info(f"Trying WinRM on {ip} with Windows credentials ({win_user}@{win_domain})...")
                     vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
                 else:
                     for domain in domains:
                         fqdn = f"{hostname}.{domain}"
+                        self.log_info(f"Trying WinRM on {fqdn} with Windows credentials ({win_user}@{win_domain})...")
                         vm_data = self.fetch_windows_data(fqdn, win_domain, win_user, win_pass)
                         if vm_data:
                             break
 
             if not vm_data:
                 self.log_failure(f"Could not reach VM: {hostname}")
+                failure_count += 1
                 continue
 
             try:
@@ -88,8 +97,16 @@ class FetchAndUpdateVMResources(Script):
                         self.log_info(f"Dry run: Would update VM '{hostname}' with: " + ", ".join(changes))
                 else:
                     self.log_info(f"No changes needed for VM '{hostname}'")
+
+                success_count += 1
             except Exception as e:
                 self.log_failure(f"Error updating VM '{hostname}': {e}")
+                failure_count += 1
+
+        # Summary
+        self.log_info("---------------------------------------------------")
+        self.log_info(f"Summary: {success_count} VMs succeeded, {failure_count} VMs failed.")
+        self.log_info("---------------------------------------------------")
 
     def get_vms(self):
         from virtualization.models import VirtualMachine
@@ -104,7 +121,8 @@ class FetchAndUpdateVMResources(Script):
             output = stdout.read().decode().strip().split("\n")
             ssh.close()
             return {"OS": "Linux", "Raw": output}
-        except:
+        except Exception as e:
+            self.log_info(f"SSH connection failed for {target}: {e}")
             return None
 
     def fetch_windows_data(self, target, domain, username, password):
@@ -115,7 +133,8 @@ class FetchAndUpdateVMResources(Script):
             mem_info = session.run_cmd("wmic OS get TotalVisibleMemorySize").std_out.decode().strip().split("\n")[1:]
             disk_info_raw = session.run_cmd("wmic logicaldisk get size,freespace,caption").std_out.decode().strip().split("\n")[1:]
             return {"OS": "Windows", "CPU": cpu_info, "Memory": mem_info, "Disks": disk_info_raw}
-        except:
+        except Exception as e:
+            self.log_info(f"WinRM connection failed for {target}: {e}")
             return None
 
     def extract_cpu_count(self, vm_data):
