@@ -82,11 +82,9 @@ class FetchAndUpdateVMResources(Script):
         self.log_info("---------------------------------------------------")
 
     def try_windows_then_linux(self, target, win_domain, win_user, win_pass, linux_user, linux_pass):
-        # Try Windows first
         vm_data = self.fetch_windows_data(target, win_domain, win_user, win_pass)
         if vm_data:
             return vm_data
-        # If Windows fails and Linux credentials provided
         if linux_user and linux_pass:
             return self.fetch_linux_data(target, linux_user, linux_pass)
         return None
@@ -96,7 +94,6 @@ class FetchAndUpdateVMResources(Script):
         ip = str(vm.primary_ip.address.ip) if vm.primary_ip else None
         vm_data = None
 
-        # Try Windows first
         if ip:
             vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
         if not vm_data and not ip:
@@ -106,7 +103,6 @@ class FetchAndUpdateVMResources(Script):
                 if vm_data:
                     break
 
-        # If Windows failed and Linux credentials provided, try Linux
         if not vm_data and linux_user and linux_pass:
             if ip:
                 vm_data = self.fetch_linux_data(ip, linux_user, linux_pass)
@@ -234,4 +230,5 @@ class FetchAndUpdateVMResources(Script):
         return disks
 
     def format_disk_name(self, hostname, disk_name):
-        return f"VD-{hostname}-disk{disk_name}"
+        short_name = hostname.split(".")[0].upper()
+        return f"VD-{short_name}-disk{disk_name}"
