@@ -1,4 +1,3 @@
-
 from extras.scripts import Script, StringVar
 from django.forms.widgets import PasswordInput
 import paramiko
@@ -34,9 +33,10 @@ class FetchAndUpdateVMResources(Script):
 
         success_count = 0
         failure_count = 0
+        failed_vms = []
 
         for vm in vms:
-            ip = vm.primary_ip.address if vm.primary_ip else None
+            ip = str(vm.primary_ip.address.ip) if vm.primary_ip else None
             hostname = vm.name
             fqdn = None
             vm_data = None
@@ -47,7 +47,7 @@ class FetchAndUpdateVMResources(Script):
             if ip:
                 self.log_info(f"Trying SSH on {ip} with Linux credentials...")
                 vm_data = self.fetch_linux_data(ip, linux_user, linux_pass)
-            else:
+            if not vm_data and not ip:
                 for domain in domains:
                     fqdn = f"{hostname}.{domain}"
                     self.log_info(f"Trying SSH on {fqdn} with Linux credentials...")
@@ -56,21 +56,21 @@ class FetchAndUpdateVMResources(Script):
                         break
 
             # If Linux failed, try Windows
-            if not vm_data:
-                if ip:
-                    self.log_info(f"Trying WinRM on {ip} with Windows credentials ({win_user}@{win_domain})...")
-                    vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
-                else:
-                    for domain in domains:
-                        fqdn = f"{hostname}.{domain}"
-                        self.log_info(f"Trying WinRM on {fqdn} with Windows credentials ({win_user}@{win_domain})...")
-                        vm_data = self.fetch_windows_data(fqdn, win_domain, win_user, win_pass)
-                        if vm_data:
-                            break
+            if not vm_data and ip:
+                self.log_info(f"Trying WinRM on {ip} with Windows credentials ({win_user}@{win_domain})...")
+                vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
+            if not vm_data and not ip:
+                for domain in domains:
+                    fqdn = f"{hostname}.{domain}"
+                    self.log_info(f"Trying WinRM on {fqdn} with Windows credentials ({win_user}@{win_domain})...")
+                    vm_data = self.fetch_windows_data(fqdn, win_domain, win_user, win_pass)
+                    if vm_data:
+                        break
 
             if not vm_data:
                 self.log_failure(f"Could not reach VM: {hostname}")
                 failure_count += 1
+                failed_vms.append(hostname)
                 continue
 
             try:
@@ -102,10 +102,13 @@ class FetchAndUpdateVMResources(Script):
             except Exception as e:
                 self.log_failure(f"Error updating VM '{hostname}': {e}")
                 failure_count += 1
+                failed_vms.append(hostname)
 
         # Summary
         self.log_info("---------------------------------------------------")
         self.log_info(f"Summary: {success_count} VMs succeeded, {failure_count} VMs failed.")
+        if failed_vms:
+            self.log_info("Failed VMs: " + ", ".join(failed_vms))
         self.log_info("---------------------------------------------------")
 
     def get_vms(self):
