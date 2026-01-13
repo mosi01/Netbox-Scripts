@@ -5,7 +5,6 @@ import winrm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class FetchAndUpdateVMResources(Script):
-    # Inputs
     linux_username = StringVar(description="Linux Username (optional)", required=False)
     linux_password = StringVar(description="Linux Password (optional)", widget=PasswordInput, required=False)
     windows_domain = StringVar(description="Windows Domain (e.g. se.lindab.com)")
@@ -81,6 +80,16 @@ class FetchAndUpdateVMResources(Script):
         if failed_vms:
             self.log_info("Failed VMs: " + ", ".join(failed_vms))
         self.log_info("---------------------------------------------------")
+
+    def try_windows_then_linux(self, target, win_domain, win_user, win_pass, linux_user, linux_pass):
+        # Try Windows first
+        vm_data = self.fetch_windows_data(target, win_domain, win_user, win_pass)
+        if vm_data:
+            return vm_data
+        # If Windows fails and Linux credentials provided
+        if linux_user and linux_pass:
+            return self.fetch_linux_data(target, linux_user, linux_pass)
+        return None
 
     def process_vm(self, vm, win_domain, win_user, win_pass, linux_user, linux_pass, domains, commit):
         hostname = vm.name
