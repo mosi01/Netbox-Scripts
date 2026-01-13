@@ -1,22 +1,31 @@
-
 from extras.scripts import Script, StringVar
 from django.forms.widgets import PasswordInput
 import paramiko
 import winrm
 
 class FetchAndUpdateVMResources(Script):
-    ad_username = StringVar(description="Service Account Username")
-    ad_password = StringVar(description="Service Account Password", widget=PasswordInput)
-    domain_suffixes = StringVar(description="Domain suffixes (semicolon-separated, e.g. example.com;corp.local)")
+    linux_username = StringVar(description="Linux Username")
+    linux_password = StringVar(description="Linux Password", widget=PasswordInput)
+    windows_domain = StringVar(description="Windows Domain (e.g. contoso.com)")
+    windows_username = StringVar(description="Windows Username")
+    windows_password = StringVar(description="Windows Password", widget=PasswordInput)
+    domain_suffixes = StringVar(description="Domain suffixes for Windows (semicolon-separated, e.g. contoso.com;domain.com)")
 
     class Meta:
         name = "Fetch and Update VM Resources"
         description = "Fetch vCPU, Memory, and Disk info for VMs and update NetBox records."
-        field_order = ["ad_username", "ad_password", "domain_suffixes"]
+        field_order = [
+            "linux_username", "linux_password",
+            "windows_domain", "windows_username", "windows_password",
+            "domain_suffixes"
+        ]
 
     def run(self, data, commit):
-        username = data["ad_username"]
-        password = data["ad_password"]
+        linux_user = data["linux_username"]
+        linux_pass = data["linux_password"]
+        win_domain = data["windows_domain"]
+        win_user = data["windows_username"]
+        win_pass = data["windows_password"]
         domains = [d.strip() for d in data["domain_suffixes"].split(";") if d.strip()]
 
         vms = self.get_vms()
@@ -30,14 +39,26 @@ class FetchAndUpdateVMResources(Script):
 
             self.log_info(f"Processing VM: {hostname}")
 
+            # Try Linux first
             if ip:
-                vm_data = self.fetch_vm_data(ip, username, password)
+                vm_data = self.fetch_linux_data(ip, linux_user, linux_pass)
             else:
                 for domain in domains:
                     fqdn = f"{hostname}.{domain}"
-                    vm_data = self.fetch_vm_data(fqdn, username, password)
+                    vm_data = self.fetch_linux_data(fqdn, linux_user, linux_pass)
                     if vm_data:
                         break
+
+            # If Linux failed, try Windows
+            if not vm_data:
+                if ip:
+                    vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
+                else:
+                    for domain in domains:
+                        fqdn = f"{hostname}.{domain}"
+                        vm_data = self.fetch_windows_data(fqdn, win_domain, win_user, win_pass)
+                        if vm_data:
+                            break
 
             if not vm_data:
                 self.log_failure(f"Could not reach VM: {hostname}")
@@ -74,7 +95,7 @@ class FetchAndUpdateVMResources(Script):
         from virtualization.models import VirtualMachine
         return VirtualMachine.objects.all()
 
-    def fetch_vm_data(self, target, username, password):
+    def fetch_linux_data(self, target, username, password):
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -84,9 +105,12 @@ class FetchAndUpdateVMResources(Script):
             ssh.close()
             return {"OS": "Linux", "Raw": output}
         except:
-            pass
+            return None
+
+    def fetch_windows_data(self, target, domain, username, password):
         try:
-            session = winrm.Session(target, auth=(username, password))
+            full_user = f"{username}@{domain}"
+            session = winrm.Session(target, auth=(full_user, password))
             cpu_info = session.run_cmd("wmic cpu get NumberOfLogicalProcessors").std_out.decode().strip().split("\n")[1:]
             mem_info = session.run_cmd("wmic OS get TotalVisibleMemorySize").std_out.decode().strip().split("\n")[1:]
             disk_info_raw = session.run_cmd("wmic logicaldisk get size,freespace,caption").std_out.decode().strip().split("\n")[1:]
