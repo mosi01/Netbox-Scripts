@@ -1,17 +1,18 @@
-
-from extras.scripts import Script
+from extras.scripts import Script, StringVar
+from django.forms.widgets import PasswordInput
 import paramiko
 import winrm
 import json
 
 class FetchAndUpdateVMResources(Script):
-    class Meta:
-        name = "Fetch and Update VM Resources"
-        description = "Fetch vCPU, Memory, and Disk info for VMs and update NetBox records."
-
     ad_username = StringVar(description="Service Account Username")
     ad_password = StringVar(description="Service Account Password", widget=PasswordInput)
     domain_suffixes = StringVar(description="Domain suffixes (semicolon-separated, e.g. example.com;corp.local)")
+
+    class Meta:
+        name = "Fetch and Update VM Resources"
+        description = "Fetch vCPU, Memory, and Disk info for VMs and update NetBox records."
+        field_order = ["ad_username", "ad_password", "domain_suffixes"]
 
     def run(self, data, commit):
         username = data["ad_username"]
@@ -84,7 +85,6 @@ class FetchAndUpdateVMResources(Script):
             return {"OS": "Linux", "Raw": output}
         except:
             pass
-
         try:
             session = winrm.Session(target, auth=(username, password))
             cpu_info = session.run_cmd("wmic cpu get NumberOfLogicalProcessors").std_out.decode().strip().split("\n")[1:]
