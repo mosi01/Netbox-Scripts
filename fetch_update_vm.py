@@ -1,4 +1,3 @@
-
 from extras.scripts import Script, StringVar, BooleanVar, ChoiceVar
 from django.forms.widgets import PasswordInput
 import paramiko
@@ -227,4 +226,3 @@ class FetchAndUpdateVMResources(Script):
 
     def format_disk_name(self, hostname, disk_name):
         return f"VD-{hostname}-disk{disk_name}"
-``
