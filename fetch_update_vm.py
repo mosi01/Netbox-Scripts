@@ -4,14 +4,14 @@ import paramiko
 import winrm
 
 class FetchAndUpdateVMResources(Script):
-    linux_username = StringVar(description="Linux Username")
-    linux_password = StringVar(description="Linux Password", widget=PasswordInput)
+    linux_username = StringVar(description="Linux Username (optional)", required=False)
+    linux_password = StringVar(description="Linux Password (optional)", widget=PasswordInput, required=False)
     windows_domain = StringVar(description="Windows Domain (e.g. se.lindab.com)")
     windows_username = StringVar(description="Windows Username")
     windows_password = StringVar(description="Windows Password", widget=PasswordInput)
     domain_suffixes = StringVar(description="Domain suffixes for Windows (semicolon-separated, e.g. contoso.com;domain.com)")
-    test_single_vm = BooleanVar(description="Test only one VM?")
-    single_vm_target = StringVar(description="IP or FQDN of the VM to test (required if checkbox is checked)")
+    test_single_vm = BooleanVar(description="Test only one VM?", required=False)
+    single_vm_target = StringVar(description="IP or FQDN of the VM to test (optional)", required=False)
 
     class Meta:
         name = "Fetch and Update VM Resources"
@@ -23,35 +23,32 @@ class FetchAndUpdateVMResources(Script):
         ]
 
     def run(self, data, commit):
-        linux_user = data["linux_username"]
-        linux_pass = data["linux_password"]
+        linux_user = data.get("linux_username")
+        linux_pass = data.get("linux_password")
         win_domain = data["windows_domain"]
         win_user = data["windows_username"]
         win_pass = data["windows_password"]
         domains = [d.strip() for d in data["domain_suffixes"].split(";") if d.strip()]
-        test_single = data["test_single_vm"]
-        single_target = data["single_vm_target"].strip() if data["single_vm_target"] else None
+        test_single = data.get("test_single_vm", False)
+        single_target = data.get("single_vm_target", "").strip()
 
         success_count = 0
         failure_count = 0
         failed_vms = []
 
         # If single VM test is enabled
-        if test_single:
-            if not single_target:
-                self.log_failure("Single VM target is required when checkbox is checked.")
-                return
+        if test_single and single_target:
             self.log_info(f"Testing single VM: {single_target}")
             vm_data = None
 
-            # Try Linux first
-            self.log_info(f"Trying SSH on {single_target} with Linux credentials...")
-            vm_data = self.fetch_linux_data(single_target, linux_user, linux_pass)
+            # Try Windows first
+            self.log_info(f"Trying WinRM (NTLM) on {single_target} with Windows credentials ({win_user}@{win_domain})...")
+            vm_data = self.fetch_windows_data(single_target, win_domain, win_user, win_pass)
 
-            # If Linux failed, try Windows with NTLM
-            if not vm_data:
-                self.log_info(f"Trying WinRM (NTLM) on {single_target} with Windows credentials ({win_user}@{win_domain})...")
-                vm_data = self.fetch_windows_data(single_target, win_domain, win_user, win_pass)
+            # If Windows failed and Linux credentials provided, try Linux
+            if not vm_data and linux_user and linux_pass:
+                self.log_info(f"Trying SSH on {single_target} with Linux credentials...")
+                vm_data = self.fetch_linux_data(single_target, linux_user, linux_pass)
 
             if not vm_data:
                 self.log_failure(f"Could not reach VM: {single_target}")
@@ -85,20 +82,8 @@ class FetchAndUpdateVMResources(Script):
 
             self.log_info(f"Processing VM: {hostname}")
 
-            # Try Linux first
+            # Try Windows first
             if ip:
-                self.log_info(f"Trying SSH on {ip} with Linux credentials...")
-                vm_data = self.fetch_linux_data(ip, linux_user, linux_pass)
-            if not vm_data and not ip:
-                for domain in domains:
-                    fqdn = f"{hostname}.{domain}"
-                    self.log_info(f"Trying SSH on {fqdn} with Linux credentials...")
-                    vm_data = self.fetch_linux_data(fqdn, linux_user, linux_pass)
-                    if vm_data:
-                        break
-
-            # If Linux failed, try Windows with NTLM
-            if not vm_data and ip:
                 self.log_info(f"Trying WinRM (NTLM) on {ip} with Windows credentials ({win_user}@{win_domain})...")
                 vm_data = self.fetch_windows_data(ip, win_domain, win_user, win_pass)
             if not vm_data and not ip:
@@ -108,6 +93,19 @@ class FetchAndUpdateVMResources(Script):
                     vm_data = self.fetch_windows_data(fqdn, win_domain, win_user, win_pass)
                     if vm_data:
                         break
+
+            # If Windows failed and Linux credentials provided, try Linux
+            if not vm_data and linux_user and linux_pass:
+                if ip:
+                    self.log_info(f"Trying SSH on {ip} with Linux credentials...")
+                    vm_data = self.fetch_linux_data(ip, linux_user, linux_pass)
+                if not vm_data and not ip:
+                    for domain in domains:
+                        fqdn = f"{hostname}.{domain}"
+                        self.log_info(f"Trying SSH on {fqdn} with Linux credentials...")
+                        vm_data = self.fetch_linux_data(fqdn, linux_user, linux_pass)
+                        if vm_data:
+                            break
 
             if not vm_data:
                 self.log_failure(f"Could not reach VM: {hostname}")
