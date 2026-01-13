@@ -1,4 +1,5 @@
-from extras.scripts import Script, StringVar
+
+from extras.scripts import Script, StringVar, BooleanVar
 from django.forms.widgets import PasswordInput
 import paramiko
 import winrm
@@ -10,6 +11,8 @@ class FetchAndUpdateVMResources(Script):
     windows_username = StringVar(description="Windows Username")
     windows_password = StringVar(description="Windows Password", widget=PasswordInput)
     domain_suffixes = StringVar(description="Domain suffixes for Windows (semicolon-separated, e.g. contoso.com;domain.com)")
+    test_single_vm = BooleanVar(description="Test only one VM?")
+    single_vm_target = StringVar(description="IP or FQDN of the VM to test (required if checkbox is checked)")
 
     class Meta:
         name = "Fetch and Update VM Resources"
@@ -17,7 +20,7 @@ class FetchAndUpdateVMResources(Script):
         field_order = [
             "linux_username", "linux_password",
             "windows_domain", "windows_username", "windows_password",
-            "domain_suffixes"
+            "domain_suffixes", "test_single_vm", "single_vm_target"
         ]
 
     def run(self, data, commit):
@@ -27,13 +30,46 @@ class FetchAndUpdateVMResources(Script):
         win_user = data["windows_username"]
         win_pass = data["windows_password"]
         domains = [d.strip() for d in data["domain_suffixes"].split(";") if d.strip()]
-
-        vms = self.get_vms()
-        self.log_info(f"Found {len(vms)} virtual machines to process.")
+        test_single = data["test_single_vm"]
+        single_target = data["single_vm_target"].strip() if data["single_vm_target"] else None
 
         success_count = 0
         failure_count = 0
         failed_vms = []
+
+        # If single VM test is enabled
+        if test_single:
+            if not single_target:
+                self.log_failure("Single VM target is required when checkbox is checked.")
+                return
+            self.log_info(f"Testing single VM: {single_target}")
+            vm_data = None
+
+            # Try Linux first
+            self.log_info(f"Trying SSH on {single_target} with Linux credentials...")
+            vm_data = self.fetch_linux_data(single_target, linux_user, linux_pass)
+
+            # If Linux failed, try Windows
+            if not vm_data:
+                self.log_info(f"Trying WinRM on {single_target} with Windows credentials ({win_user}@{win_domain})...")
+                vm_data = self.fetch_windows_data(single_target, win_domain, win_user, win_pass)
+
+            if not vm_data:
+                self.log_failure(f"Could not reach VM: {single_target}")
+                return
+
+            try:
+                vcpus = self.extract_cpu_count(vm_data)
+                memory_mb = self.extract_memory(vm_data)
+                disk_gb = self.extract_disk_size(vm_data)
+                self.log_info(f"Fetched data: vCPUs={vcpus}, Memory={memory_mb}MB, Disk={disk_gb}GB")
+            except Exception as e:
+                self.log_failure(f"Error processing VM '{single_target}': {e}")
+            return
+
+        # Normal mode: process all VMs
+        vms = self.get_vms()
+        self.log_info(f"Found {len(vms)} virtual machines to process.")
 
         for vm in vms:
             ip = str(vm.primary_ip.address.ip) if vm.primary_ip else None
