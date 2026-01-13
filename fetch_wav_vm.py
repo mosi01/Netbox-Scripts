@@ -107,10 +107,11 @@ class CheckWindowsAntivirusStatus(Script):
             running_count = 0
             details = []
             for line in output:
-                svc, status = line.split("=")
-                details.append(f"{svc}:{status}")
-                if status.lower() == "running":
-                    running_count += 1
+                if "=" in line:
+                    svc, status = [x.strip() for x in line.split("=")]
+                    details.append(f"{svc}:{status}")
+                    if status.lower() == "running":
+                        running_count += 1
             return (True if running_count == 3 else False), ", ".join(details), ""
         except Exception as e:
             return None, "", f"WinRM connection failed: {str(e)}"
