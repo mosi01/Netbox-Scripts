@@ -5,7 +5,7 @@ import paramiko
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class CheckFirewallStatus(Script):
-    windows_domain = StringVar(description="Windows Domain (e.g. se.lindab.com)")
+    windows_domain = StringVar(description="Windows Domain (e.g. domain.com)")
     windows_username = StringVar(description="Windows Username")
     windows_password = StringVar(description="Windows Password", widget=PasswordInput)
     linux_username = StringVar(description="Linux Username (optional)", required=False)
