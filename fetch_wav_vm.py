@@ -20,7 +20,7 @@ class CheckWindowsAntivirusStatus(Script):
         name = "Check Windows Antivirus Status"
         description = (
             "Checks if Microsoft Defender services are running on Windows VMs and updates NetBox custom field 'active_antivirus'.\n"
-            "Services checked: WinDefend, WdNisSvc, Sense."
+            "Services checked: WinDefend, WdNisSvc, Sense. (Windows 2008-2012: MsMpSvc, NisSrv)"
         )
         field_order = [
             "windows_domain", "windows_username", "windows_password",
