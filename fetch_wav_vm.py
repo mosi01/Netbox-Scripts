@@ -4,7 +4,7 @@ import winrm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class CheckWindowsAntivirusStatus(Script):
-    windows_domain = StringVar(description="Windows Domain (e.g. se.lindab.com)")
+    windows_domain = StringVar(description="Windows Domain (e.g. contoso.com)")
     windows_username = StringVar(description="Windows Username")
     windows_password = StringVar(description="Windows Password", widget=PasswordInput)
     domain_suffixes = StringVar(description="Domain suffixes for Windows (semicolon-separated, e.g. contoso.com;domain.com)")
