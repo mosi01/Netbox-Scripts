@@ -47,7 +47,7 @@ class CheckWindowsAntivirusStatus(Script):
                 self.log_failure(f"[{single_target}] {error_msg}")
                 failure_results.append({"hostname": single_target, "error": error_msg})
             else:
-                self.log_info(f"[{single_target}] Antivirus Active: {status} | {details}")
+                self.log_info(f"[{single_target}] Antivirus Active: {status} \n{details}")
                 if commit:
                     vm_obj = self.get_vm_by_name(single_target)
                     if vm_obj:
@@ -72,7 +72,6 @@ class CheckWindowsAntivirusStatus(Script):
                 else:
                     failure_results.append(result)
                     self.log_failure(result["message"])
-
         return "\n".join(self.generate_csv(success_results, failure_results))
 
     def generate_csv(self, success_results, failure_results):
@@ -87,32 +86,67 @@ class CheckWindowsAntivirusStatus(Script):
         try:
             full_user = f"{username}@{domain}"
             session = winrm.Session(target, auth=(full_user, password), transport='ntlm')
+
+            # PowerShell script to check Defender and fallback to legacy services
             ps_script = """
-            $services = @('WinDefend','WdNisSvc','Sense')
-            foreach ($svc in $services) {
+            $modernServices = @('WinDefend','WdNisSvc','Sense')
+            $legacyServices = @('MsMpSvc','NisSrv')
+            $modernRunning = 0
+            $legacyRunning = 0
+            $details = @()
+
+            foreach ($svc in $modernServices) {
                 try {
                     $status = (Get-Service -Name $svc -ErrorAction SilentlyContinue).Status
                     if ($status) {
-                        Write-Output "$svc=$status"
+                        $details += "$svc=$status"
+                        if ($status -eq 'Running') { $modernRunning++ }
                     } else {
-                        Write-Output "$svc=NotInstalled"
+                        $details += "$svc=NotInstalled"
                     }
                 } catch {
-                    Write-Output "$svc=NotInstalled"
+                    $details += "$svc=NotInstalled"
                 }
             }
+
+            if ($modernRunning -eq 3) {
+                Write-Output "Antivirus=True"
+                Write-Output ($details -join ', ')
+                exit
+            }
+
+            foreach ($svc in $legacyServices) {
+                try {
+                    $status = (Get-Service -Name $svc -ErrorAction SilentlyContinue).Status
+                    if ($status) {
+                        $details += "$svc=$status"
+                        if ($status -eq 'Running') { $legacyRunning++ }
+                    } else {
+                        $details += "$svc=NotInstalled"
+                    }
+                } catch {
+                    $details += "$svc=NotInstalled"
+                }
+            }
+
+            if ($legacyRunning -eq 2) {
+                Write-Output "Antivirus=True"
+            } else {
+                Write-Output "Antivirus=False"
+            }
+            Write-Output ($details -join ', ')
             """
+
             result = session.run_ps(ps_script)
             output = result.std_out.decode().strip().split("\n")
-            running_count = 0
+            antivirus_status = False
             details = []
             for line in output:
-                if "=" in line:
-                    svc, status = [x.strip() for x in line.split("=")]
-                    details.append(f"{svc}:{status}")
-                    if status.lower() == "running":
-                        running_count += 1
-            return (True if running_count == 3 else False), ", ".join(details), ""
+                if line.startswith("Antivirus="):
+                    antivirus_status = line.split("=")[1].strip().lower() == "true"
+                else:
+                    details.append(line)
+            return antivirus_status, ", ".join(details), ""
         except Exception as e:
             return None, "", f"WinRM connection failed: {str(e)}"
 
@@ -150,7 +184,7 @@ class CheckWindowsAntivirusStatus(Script):
                 "antivirus": status,
                 "details": details,
                 "error": "",
-                "message": f"[{hostname}] SUCCESS: Antivirus Active = {status} | {details}"
+                "message": f"[{hostname}] SUCCESS: Antivirus Active = {status} \n{details}"
             }
         except Exception as e:
             return {"status": "fail", "hostname": hostname, "error": f"Update error: {str(e)}", "message": f"[{hostname}] Error updating VM: {str(e)}"}
