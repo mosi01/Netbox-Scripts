@@ -1,17 +1,16 @@
 from extras.scripts import Script, StringVar, BooleanVar
 import pynetbox
 from django.db import transaction
+from django.utils.text import slugify
 
 # Import all relevant NetBox models
 from dcim.models import (
     Region, SiteGroup, Site, Location, Rack, RackRole,
     Manufacturer, DeviceType, DeviceRole, Platform, Device,
-    ModuleType, Module, Interface, Cable
+    ModuleType, Module, Interface
 )
 from tenancy.models import Tenant, TenantGroup, Contact, ContactGroup, ContactRole
-from ipam.models import (
-    IPAddress, Prefix, VLAN, VLANGroup, VRF, ASN, Aggregate
-)
+from ipam.models import IPAddress, Prefix, VLAN, VLANGroup, VRF
 from virtualization.models import VirtualMachine, Cluster, ClusterType
 from circuits.models import Circuit, CircuitType, Provider
 from wireless.models import WirelessLAN, WirelessLANGroup
@@ -20,10 +19,9 @@ from extras.models import ConfigContext, Tag
 class FullSyncFromProduction(Script):
     class Meta:
         name = "Full Sync from Production"
-        description = "Pull ALL major data from production NetBox API and recreate in test environment in correct dependency order."
+        description = "Sync all major NetBox objects from production to dev environment in correct dependency order."
 
-    # Script variables
-    prod_url = StringVar(description="Production NetBox API URL", default="https://netbox.contoso.com")
+    prod_url = StringVar(description="Production NetBox API URL", default="https://netbox.lindab.com")
     api_key = StringVar(description="API Key (first part)")
     api_token = StringVar(description="API Token (second part)")
     ca_cert_path = StringVar(description="Path to CA certificate (optional)", required=False)
@@ -40,20 +38,18 @@ class FullSyncFromProduction(Script):
             self.log_warning("SSL verification is DISABLED. This is insecure!")
             nb.http_session.verify = False
         elif data.get('ca_cert_path'):
-            self.log_info(f"Using custom CA certificate: {data['ca_cert_path']}")
             nb.http_session.verify = data['ca_cert_path']
         else:
             nb.http_session.verify = True
 
-        # Optional full wipe
+        # Full wipe
         if data['full_wipe'] and commit:
             self.log_warning("Performing FULL WIPE of dev environment...")
             with transaction.atomic():
                 self._wipe_models([
-                    Cable, Interface, Module, Device, Rack, Location, Site, Region,
+                    Interface, Module, Device, Rack, Location, Site, Region,
                     Manufacturer, DeviceType, DeviceRole, Platform,
-                    Tenant, TenantGroup, Contact, ContactGroup, ContactRole,
-                    IPAddress, Prefix, VLAN, VLANGroup, VRF, ASN, Aggregate,
+                    IPAddress, Prefix, VLAN, VLANGroup, VRF,
                     VirtualMachine, Cluster, ClusterType,
                     Circuit, CircuitType, Provider,
                     WirelessLAN, WirelessLANGroup,
@@ -61,57 +57,36 @@ class FullSyncFromProduction(Script):
                 ])
             self.log_success("Full wipe completed.")
 
-        # Sequential sync in dependency order
         self.log_info("Starting sync in dependency order...")
 
-        # 1. Manufacturers
+        # Sync in correct order
         self._sync_objects("Manufacturers", nb.dcim.manufacturers.all(), self._sync_manufacturers, commit)
-
-        # 2. Device Types, Module Types
+        self._sync_objects("Device Roles", nb.dcim.device_roles.all(), self._sync_device_roles, commit)
+        self._sync_objects("Platforms", nb.dcim.platforms.all(), self._sync_platforms, commit)
         self._sync_objects("Device Types", nb.dcim.device_types.all(), self._sync_device_types, commit)
         self._sync_objects("Module Types", nb.dcim.module_types.all(), self._sync_module_types, commit)
-
-        # 3. Regions, Site Groups, Sites, Locations
         self._sync_objects("Regions", nb.dcim.regions.all(), self._sync_regions, commit)
         self._sync_objects("Site Groups", nb.dcim.site_groups.all(), self._sync_site_groups, commit)
         self._sync_objects("Sites", nb.dcim.sites.all(), self._sync_sites, commit)
         self._sync_objects("Locations", nb.dcim.locations.all(), self._sync_locations, commit)
-
-        # 4. Rack Roles, Racks
         self._sync_objects("Rack Roles", nb.dcim.rack_roles.all(), self._sync_rack_roles, commit)
         self._sync_objects("Racks", nb.dcim.racks.all(), self._sync_racks, commit)
-
-        # 5. Device Roles, Platforms, Devices, Modules
-        self._sync_objects("Device Roles", nb.dcim.device_roles.all(), self._sync_device_roles, commit)
-        self._sync_objects("Platforms", nb.dcim.platforms.all(), self._sync_platforms, commit)
         self._sync_objects("Devices", nb.dcim.devices.all(), self._sync_devices, commit)
         self._sync_objects("Modules", nb.dcim.modules.all(), self._sync_modules, commit)
-
-        # 6. Interfaces
         self._sync_objects("Interfaces", nb.dcim.interfaces.all(), self._sync_interfaces, commit)
-
-        # 7. IPAM: VRFs, Prefixes, VLAN Groups, VLANs, IP Addresses
         self._sync_objects("VRFs", nb.ipam.vrfs.all(), self._sync_vrfs, commit)
         self._sync_objects("Prefixes", nb.ipam.prefixes.all(), self._sync_prefixes, commit)
         self._sync_objects("VLAN Groups", nb.ipam.vlan_groups.all(), self._sync_vlan_groups, commit)
         self._sync_objects("VLANs", nb.ipam.vlans.all(), self._sync_vlans, commit)
         self._sync_objects("IP Addresses", nb.ipam.ip_addresses.all(), self._sync_ip_addresses, commit)
-
-        # 8. Virtualization: Cluster Types, Clusters, Virtual Machines
         self._sync_objects("Cluster Types", nb.virtualization.cluster_types.all(), self._sync_cluster_types, commit)
         self._sync_objects("Clusters", nb.virtualization.clusters.all(), self._sync_clusters, commit)
         self._sync_objects("Virtual Machines", nb.virtualization.virtual_machines.all(), self._sync_virtual_machines, commit)
-
-        # 9. Circuits: Providers, Circuit Types, Circuits
         self._sync_objects("Providers", nb.circuits.providers.all(), self._sync_providers, commit)
         self._sync_objects("Circuit Types", nb.circuits.circuit_types.all(), self._sync_circuit_types, commit)
         self._sync_objects("Circuits", nb.circuits.circuits.all(), self._sync_circuits, commit)
-
-        # 10. Wireless
         self._sync_objects("Wireless LAN Groups", nb.wireless.wireless_lan_groups.all(), self._sync_wireless_lan_groups, commit)
         self._sync_objects("Wireless LANs", nb.wireless.wireless_lans.all(), self._sync_wireless_lans, commit)
-
-        # 11. Extras
         self._sync_objects("Tags", nb.extras.tags.all(), self._sync_tags, commit)
         self._sync_objects("Config Contexts", nb.extras.config_contexts.all(), self._sync_config_contexts, commit)
 
@@ -131,76 +106,83 @@ class FullSyncFromProduction(Script):
         except Exception as e:
             self.log_failure(f"Failed to sync {name}: {e}")
 
-    # Sync functions for each object type
+    # Utility: Generate slug if missing
+    def _slug(self, value):
+        return slugify(value) if value else None
+
+    # Sync functions
     def _sync_manufacturers(self, manufacturers, commit):
         for m in manufacturers:
             if commit:
-                Manufacturer.objects.update_or_create(name=m.name, defaults={'slug': m.slug})
+                Manufacturer.objects.update_or_create(name=m.name, defaults={'slug': self._slug(m.slug or m.name)})
+
+    def _sync_device_roles(self, roles, commit):
+        for role in roles:
+            if commit:
+                DeviceRole.objects.update_or_create(name=role.name, defaults={'slug': self._slug(role.slug or role.name)})
+
+    def _sync_platforms(self, platforms, commit):
+        for p in platforms:
+            if commit:
+                Platform.objects.update_or_create(name=p.name, defaults={'slug': self._slug(p.slug or p.name)})
 
     def _sync_device_types(self, device_types, commit):
         for dt in device_types:
             if commit:
                 manufacturer = Manufacturer.objects.filter(name=dt.manufacturer.name).first() if dt.manufacturer else None
-                DeviceType.objects.update_or_create(model=dt.model, defaults={'manufacturer': manufacturer})
+                if manufacturer:
+                    DeviceType.objects.update_or_create(model=dt.model, defaults={'manufacturer': manufacturer, 'slug': self._slug(dt.slug or dt.model)})
 
     def _sync_module_types(self, module_types, commit):
         for mt in module_types:
             if commit:
                 manufacturer = Manufacturer.objects.filter(name=mt.manufacturer.name).first() if mt.manufacturer else None
-                ModuleType.objects.update_or_create(model=mt.model, defaults={'manufacturer': manufacturer})
+                if manufacturer:
+                    ModuleType.objects.update_or_create(model=mt.model, defaults={'manufacturer': manufacturer, 'slug': self._slug(mt.slug or mt.model)})
 
     def _sync_regions(self, regions, commit):
         for region in regions:
             if commit:
-                Region.objects.update_or_create(name=region.name, defaults={'slug': region.slug})
+                Region.objects.update_or_create(name=region.name, defaults={'slug': self._slug(region.slug or region.name)})
 
     def _sync_site_groups(self, site_groups, commit):
         for sg in site_groups:
             if commit:
-                SiteGroup.objects.update_or_create(name=sg.name, defaults={'slug': sg.slug})
+                SiteGroup.objects.update_or_create(name=sg.name, defaults={'slug': self._slug(sg.slug or sg.name)})
 
     def _sync_sites(self, sites, commit):
         for site in sites:
             if commit:
                 region_obj = Region.objects.filter(name=site.region.name).first() if site.region else None
-                Site.objects.update_or_create(name=site.name, defaults={'slug': site.slug, 'region': region_obj})
+                Site.objects.update_or_create(name=site.name, defaults={'slug': self._slug(site.slug or site.name), 'region': region_obj})
 
     def _sync_locations(self, locations, commit):
         for loc in locations:
             if commit:
                 site_obj = Site.objects.filter(name=loc.site.name).first() if loc.site else None
                 if site_obj:
-                    Location.objects.update_or_create(name=loc.name, defaults={'site': site_obj})
+                    Location.objects.update_or_create(name=loc.name, defaults={'site': site_obj, 'slug': self._slug(loc.slug or loc.name)})
 
     def _sync_rack_roles(self, roles, commit):
         for role in roles:
             if commit:
-                RackRole.objects.update_or_create(name=role.name)
+                RackRole.objects.update_or_create(name=role.name, defaults={'slug': self._slug(role.slug or role.name)})
 
     def _sync_racks(self, racks, commit):
         for rack in racks:
             if commit:
                 site_obj = Site.objects.filter(name=rack.site.name).first() if rack.site else None
                 if site_obj:
-                    Rack.objects.update_or_create(name=rack.name, defaults={'site': site_obj})
-
-    def _sync_device_roles(self, roles, commit):
-        for role in roles:
-            if commit:
-                DeviceRole.objects.update_or_create(name=role.name)
-
-    def _sync_platforms(self, platforms, commit):
-        for p in platforms:
-            if commit:
-                Platform.objects.update_or_create(name=p.name)
+                    Rack.objects.update_or_create(name=rack.name, defaults={'site': site_obj, 'slug': self._slug(rack.slug or rack.name)})
 
     def _sync_devices(self, devices, commit):
         for device in devices:
             if commit:
                 site_obj = Site.objects.filter(name=device.site.name).first() if device.site else None
                 dtype_obj = DeviceType.objects.filter(model=device.device_type.model).first() if device.device_type else None
-                if site_obj and dtype_obj:
-                    Device.objects.update_or_create(name=device.name, defaults={'site': site_obj, 'device_type': dtype_obj})
+                role_obj = DeviceRole.objects.filter(name=device.device_role.name).first() if device.device_role else None
+                if site_obj and dtype_obj and role_obj:
+                    Device.objects.update_or_create(name=device.name, defaults={'site': site_obj, 'device_type': dtype_obj, 'role': role_obj})
 
     def _sync_modules(self, modules, commit):
         for module in modules:
@@ -245,7 +227,7 @@ class FullSyncFromProduction(Script):
     def _sync_cluster_types(self, types, commit):
         for ct in types:
             if commit:
-                ClusterType.objects.update_or_create(name=ct.name)
+                ClusterType.objects.update_or_create(name=ct.name, defaults={'slug': self._slug(ct.slug or ct.name)})
 
     def _sync_clusters(self, clusters, commit):
         for cluster in clusters:
@@ -262,24 +244,25 @@ class FullSyncFromProduction(Script):
     def _sync_providers(self, providers, commit):
         for provider in providers:
             if commit:
-                Provider.objects.update_or_create(name=provider.name)
+                Provider.objects.update_or_create(name=provider.name, defaults={'slug': self._slug(provider.slug or provider.name)})
 
     def _sync_circuit_types(self, types, commit):
         for ct in types:
             if commit:
-                CircuitType.objects.update_or_create(name=ct.name)
+                CircuitType.objects.update_or_create(name=ct.name, defaults={'slug': self._slug(ct.slug or ct.name)})
 
     def _sync_circuits(self, circuits, commit):
         for circuit in circuits:
             if commit:
                 provider_obj = Provider.objects.filter(name=circuit.provider.name).first() if circuit.provider else None
-                if provider_obj:
-                    Circuit.objects.update_or_create(cid=circuit.cid, defaults={'provider': provider_obj})
+                ctype_obj = CircuitType.objects.filter(name=circuit.type.name).first() if circuit.type else None
+                if provider_obj and ctype_obj:
+                    Circuit.objects.update_or_create(cid=circuit.cid, defaults={'provider': provider_obj, 'type': ctype_obj})
 
     def _sync_wireless_lan_groups(self, groups, commit):
         for group in groups:
             if commit:
-                WirelessLANGroup.objects.update_or_create(name=group.name)
+                WirelessLANGroup.objects.update_or_create(name=group.name, defaults={'slug': self._slug(group.slug or group.name)})
 
     def _sync_wireless_lans(self, lans, commit):
         for lan in lans:
