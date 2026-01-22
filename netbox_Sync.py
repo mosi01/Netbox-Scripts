@@ -56,14 +56,28 @@ class FullSyncFromProduction(Script):
                 ])
             self.log_success("Full wipe completed.")
 
-        # Multi-threaded sync
+        # Multi-threaded sync with detailed logging
         self.log_info(f"Starting sync with {data['thread_count']} threads...")
         endpoints = [
             ("Regions", nb.dcim.regions.all, self._sync_regions),
+            ("Site Groups", nb.dcim.site_groups.all, self._sync_site_groups),
             ("Sites", nb.dcim.sites.all, self._sync_sites),
+            ("Locations", nb.dcim.locations.all, self._sync_locations),
+            ("Racks", nb.dcim.racks.all, self._sync_racks),
             ("Devices", nb.dcim.devices.all, self._sync_devices),
+            ("Interfaces", nb.dcim.interfaces.all, self._sync_interfaces),
             ("IP Addresses", nb.ipam.ip_addresses.all, self._sync_ip_addresses),
-            # Add more endpoints here...
+            ("Prefixes", nb.ipam.prefixes.all, self._sync_prefixes),
+            ("VLANs", nb.ipam.vlans.all, self._sync_vlans),
+            ("VRFs", nb.ipam.vrfs.all, self._sync_vrfs),
+            ("Virtual Machines", nb.virtualization.virtual_machines.all, self._sync_virtual_machines),
+            ("Clusters", nb.virtualization.clusters.all, self._sync_clusters),
+            ("Circuits", nb.circuits.circuits.all, self._sync_circuits),
+            ("Providers", nb.circuits.providers.all, self._sync_providers),
+            ("Wireless LANs", nb.wireless.wireless_lans.all, self._sync_wireless_lans),
+            ("Wireless LAN Groups", nb.wireless.wireless_lan_groups.all, self._sync_wireless_lan_groups),
+            ("Tags", nb.extras.tags.all, self._sync_tags),
+            ("Config Contexts", nb.extras.config_contexts.all, self._sync_config_contexts),
         ]
 
         with ThreadPoolExecutor(max_workers=data['thread_count']) as executor:
@@ -90,6 +104,11 @@ class FullSyncFromProduction(Script):
             if commit:
                 Region.objects.update_or_create(name=region.name, defaults={'slug': region.slug})
 
+    def _sync_site_groups(self, site_groups, commit):
+        for sg in site_groups:
+            if commit:
+                SiteGroup.objects.update_or_create(name=sg.name, defaults={'slug': sg.slug})
+
     def _sync_sites(self, sites, commit):
         for site in sites:
             if commit:
@@ -98,6 +117,18 @@ class FullSyncFromProduction(Script):
                     name=site.name,
                     defaults={'slug': site.slug, 'region': region_obj, 'status': site.status.value}
                 )
+
+    def _sync_locations(self, locations, commit):
+        for loc in locations:
+            if commit:
+                site_obj = Site.objects.filter(name=loc.site.name).first() if loc.site else None
+                Location.objects.update_or_create(name=loc.name, defaults={'site': site_obj})
+
+    def _sync_racks(self, racks, commit):
+        for rack in racks:
+            if commit:
+                site_obj = Site.objects.filter(name=rack.site.name).first() if rack.site else None
+                Rack.objects.update_or_create(name=rack.name, defaults={'site': site_obj})
 
     def _sync_devices(self, devices, commit):
         for device in devices:
@@ -112,6 +143,12 @@ class FullSyncFromProduction(Script):
                     }
                 )
 
+    def _sync_interfaces(self, interfaces, commit):
+        for iface in interfaces:
+            if commit:
+                device_obj = Device.objects.filter(name=iface.device.name).first() if iface.device else None
+                Interface.objects.update_or_create(name=iface.name, defaults={'device': device_obj})
+
     def _sync_ip_addresses(self, ips, commit):
         for ip in ips:
             if commit:
@@ -122,3 +159,58 @@ class FullSyncFromProduction(Script):
                         'role': ip.role.value if ip.role else None
                     }
                 )
+
+    def _sync_prefixes(self, prefixes, commit):
+        for prefix in prefixes:
+            if commit:
+                Prefix.objects.update_or_create(prefix=prefix.prefix, defaults={'status': prefix.status.value})
+
+    def _sync_vlans(self, vlans, commit):
+        for vlan in vlans:
+            if commit:
+                VLAN.objects.update_or_create(vid=vlan.vid, defaults={'name': vlan.name})
+
+    def _sync_vrfs(self, vrfs, commit):
+        for vrf in vrfs:
+            if commit:
+                VRF.objects.update_or_create(name=vrf.name, defaults={'rd': vrf.rd})
+
+    def _sync_virtual_machines(self, vms, commit):
+        for vm in vms:
+            if commit:
+                VirtualMachine.objects.update_or_create(name=vm.name, defaults={'status': vm.status.value})
+
+    def _sync_clusters(self, clusters, commit):
+        for cluster in clusters:
+            if commit:
+                Cluster.objects.update_or_create(name=cluster.name, defaults={'type_id': cluster.type.id})
+
+    def _sync_circuits(self, circuits, commit):
+        for circuit in circuits:
+            if commit:
+                Circuit.objects.update_or_create(cid=circuit.cid, defaults={'status': circuit.status.value})
+
+    def _sync_providers(self, providers, commit):
+        for provider in providers:
+            if commit:
+                Provider.objects.update_or_create(name=provider.name)
+
+    def _sync_wireless_lans(self, lans, commit):
+        for lan in lans:
+            if commit:
+                WirelessLAN.objects.update_or_create(ssid=lan.ssid)
+
+    def _sync_wireless_lan_groups(self, groups, commit):
+        for group in groups:
+            if commit:
+                WirelessLANGroup.objects.update_or_create(name=group.name)
+
+    def _sync_tags(self, tags, commit):
+        for tag in tags:
+            if commit:
+                Tag.objects.update_or_create(name=tag.name)
+
+    def _sync_config_contexts(self, contexts, commit):
+        for ctx in contexts:
+            if commit:
+                ConfigContext.objects.update_or_create(name=ctx.name)
