@@ -21,7 +21,7 @@ class FullSyncFromProduction(Script):
         name = "Full Sync from Production"
         description = "Sync all major NetBox objects from production to dev environment in correct dependency order."
 
-    prod_url = StringVar(description="Production NetBox API URL", default="https://netbox.lindab.com")
+    prod_url = StringVar(description="Production NetBox API URL", default="https://netbox.contoso.com")
     api_key = StringVar(description="API Key (first part)")
     api_token = StringVar(description="API Token (second part)")
     ca_cert_path = StringVar(description="Path to CA certificate (optional)", required=False)
