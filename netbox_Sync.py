@@ -1,3 +1,4 @@
+
 from extras.scripts import Script, StringVar, BooleanVar
 import pynetbox
 from dcim.models import Site, Device
@@ -11,18 +12,24 @@ class SyncFromProduction(Script):
     # Script variables for flexibility
     prod_url = StringVar(
         description="Production NetBox API URL",
-        default="https://prod-netbox.example.com"
+        default="https://netbox.lindab.com"
+    )
+    api_key = StringVar(
+        description="API Key (first part)"
     )
     api_token = StringVar(
-        description="Production NetBox API Token"
+        description="API Token (second part)"
     )
     sync_sites = BooleanVar(description="Sync Sites", default=True)
     sync_devices = BooleanVar(description="Sync Devices", default=True)
     sync_ips = BooleanVar(description="Sync IP Addresses", default=False)
 
     def run(self, data, commit):
-        self.log_info("Connecting to production NetBox API...")
-        nb = pynetbox.api(data['prod_url'], token=data['api_token'])
+        # Combine Key and Token into full Bearer token
+        full_token = f"nbt_{data['api_key']}.{data['api_token']}"
+
+        self.log_info(f"Connecting to production NetBox API at {data['prod_url']}...")
+        nb = pynetbox.api(data['prod_url'], token=full_token)
 
         # Sync Sites
         if data['sync_sites']:
