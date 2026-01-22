@@ -45,15 +45,37 @@ class FullSyncFromProduction(Script):
         # Full wipe
         if data['full_wipe'] and commit:
             self.log_warning("Performing FULL WIPE of dev environment...")
-            with transaction.atomic():
+            with transaction.atomic():                
                 self._wipe_models([
-                    Interface, Module, Device, Rack, Location, Site, Region,
-                    Manufacturer, DeviceType, DeviceRole, Platform,
-                    IPAddress, Prefix, VLAN, VLANGroup, VRF,
-                    VirtualMachine, Cluster, ClusterType,
-                    Circuit, CircuitType, Provider,
-                    WirelessLAN, WirelessLANGroup,
-                    ConfigContext, Tag
+                    Interface,
+                    Module,
+                    Device,
+                    DeviceType,
+                    ModuleType,
+                    Rack,
+                    Location,
+                    Site,
+                    SiteGroup,
+                    Region,
+                    RackRole,
+                    DeviceRole,
+                    Platform,
+                    Manufacturer,
+                    IPAddress,
+                    Prefix,
+                    VLAN,
+                    VLANGroup,
+                    VRF,
+                    VirtualMachine,
+                    Cluster,
+                    ClusterType,
+                    Circuit,
+                    CircuitType,
+                    Provider,
+                    WirelessLAN,
+                    WirelessLANGroup,
+                    ConfigContext,
+                    Tag
                 ])
             self.log_success("Full wipe completed.")
 
@@ -92,11 +114,16 @@ class FullSyncFromProduction(Script):
 
         self.log_success("Full sync completed successfully!")
 
+
     def _wipe_models(self, models):
         for model in models:
             count = model.objects.count()
-            model.objects.all().delete()
-            self.log_info(f"Wiped {count} objects from {model.__name__}")
+            try:
+                model.objects.all().delete()
+                self.log_info(f"Wiped {count} objects from {model.__name__}")
+            except Exception as e:
+                self.log_warning(f"Could not wipe {model.__name__}: {e}")
+
 
     def _sync_objects(self, name, queryset, func, commit):
         try:
