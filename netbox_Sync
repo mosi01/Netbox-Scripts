@@ -1,0 +1,54 @@
+
+from extras.scripts import Script
+import requests
+from django.conf import settings
+from dcim.models import Device, Site
+from ipam.models import IPAddress
+
+class SyncFromProduction(Script):
+    class Meta:
+        name = "Sync from Production"
+        description = "Pull data from production NetBox API and recreate in test environment."
+
+    prod_api_url = settings.CUSTOM_FIELDS.get('PROD_API_URL', 'https://prod-netbox.example.com/api/')
+    prod_api_token = settings.CUSTOM_FIELDS.get('PROD_API_TOKEN', 'YOUR_TOKEN_HERE')
+
+    def run(self, data, commit):
+        headers = {
+            "Authorization": f"Token {self.prod_api_token}",
+            "Content-Type": "application/json"
+        }
+
+        # Example: Sync Sites
+        self.log_info("Fetching sites from production...")
+        sites = requests.get(f"{self.prod_api_url}dcim/sites/", headers=headers).json()['results']
+
+        for site in sites:
+            self.log_info(f"Syncing site: {site['name']}")
+            if commit:
+                Site.objects.update_or_create(
+                    name=site['name'],
+                    defaults={
+                        'slug': site['slug'],
+                        'status': site['status']['value']
+                    }
+                )
+
+        # Example: Sync Devices
+        self.log_info("Fetching devices from production...")
+        devices = requests.get(f"{self.prod_api_url}dcim/devices/", headers=headers).json()['results']
+
+        for device in devices:
+            self.log_info(f"Syncing device: {device['name']}")
+            if commit:
+                site_obj = Site.objects.get(name=device['site']['name'])
+                Device.objects.update_or_create(
+                    name=device['name'],
+                    defaults={
+                        'device_type_id': device['device_type']['id'],
+                        'site': site_obj,
+                        'status': device['status']['value']
+                    }
+                )
+
+        self.log_success("Sync completed successfully!")
