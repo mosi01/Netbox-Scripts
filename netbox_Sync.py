@@ -1,7 +1,8 @@
-from extras.scripts import Script, StringVar, BooleanVar
+from extras.scripts import Script, StringVar, BooleanVar, IntegerVar
 import pynetbox
 from django.db import transaction
 from django.utils.text import slugify
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import all relevant NetBox models
 from dcim.models import (
@@ -19,7 +20,7 @@ from extras.models import ConfigContext, Tag
 class FullSyncFromProduction(Script):
     class Meta:
         name = "Full Sync from Production"
-        description = "Sync all major NetBox objects from production to dev environment in correct dependency order."
+        description = "Sync all major NetBox objects from production to dev environment in correct dependency order with multi-threading."
 
     prod_url = StringVar(description="Production NetBox API URL", default="https://netbox.lindab.com")
     api_key = StringVar(description="API Key (first part)")
@@ -27,6 +28,7 @@ class FullSyncFromProduction(Script):
     ca_cert_path = StringVar(description="Path to CA certificate (optional)", required=False)
     disable_ssl_verify = BooleanVar(description="Disable SSL verification (NOT recommended for production)", default=False)
     full_wipe = BooleanVar(description="Wipe all existing data before sync", default=False)
+    thread_count = IntegerVar(description="Number of threads for parallel sync", default=5)
 
     def run(self, data, commit):
         full_token = f"nbt_{data['api_key']}.{data['api_token']}"
@@ -58,38 +60,76 @@ class FullSyncFromProduction(Script):
                 ])
             self.log_success("Full wipe completed.")
 
-        self.log_info("Starting sync in dependency order...")
+        self.log_info(f"Starting sync with {data['thread_count']} threads...")
 
-        # Sync in correct order
-        self._sync_objects("Manufacturers", nb.dcim.manufacturers.all(), self._sync_manufacturers, commit)
-        self._sync_objects("Device Roles", nb.dcim.device_roles.all(), self._sync_device_roles, commit)
-        self._sync_objects("Platforms", nb.dcim.platforms.all(), self._sync_platforms, commit)
-        self._sync_objects("Device Types", nb.dcim.device_types.all(), self._sync_device_types, commit)
-        self._sync_objects("Module Types", nb.dcim.module_types.all(), self._sync_module_types, commit)
-        self._sync_objects("Regions", nb.dcim.regions.all(), self._sync_regions, commit)
-        self._sync_objects("Site Groups", nb.dcim.site_groups.all(), self._sync_site_groups, commit)
-        self._sync_objects("Sites", nb.dcim.sites.all(), self._sync_sites, commit)
-        self._sync_objects("Locations", nb.dcim.locations.all(), self._sync_locations, commit)
-        self._sync_objects("Rack Roles", nb.dcim.rack_roles.all(), self._sync_rack_roles, commit)
-        self._sync_objects("Racks", nb.dcim.racks.all(), self._sync_racks, commit)
-        self._sync_objects("Devices", nb.dcim.devices.all(), self._sync_devices, commit)
-        self._sync_objects("Modules", nb.dcim.modules.all(), self._sync_modules, commit)
-        self._sync_objects("Interfaces", nb.dcim.interfaces.all(), self._sync_interfaces, commit)
-        self._sync_objects("VRFs", nb.ipam.vrfs.all(), self._sync_vrfs, commit)
-        self._sync_objects("Prefixes", nb.ipam.prefixes.all(), self._sync_prefixes, commit)
-        self._sync_objects("VLAN Groups", nb.ipam.vlan_groups.all(), self._sync_vlan_groups, commit)
-        self._sync_objects("VLANs", nb.ipam.vlans.all(), self._sync_vlans, commit)
-        self._sync_objects("IP Addresses", nb.ipam.ip_addresses.all(), self._sync_ip_addresses, commit)
-        self._sync_objects("Cluster Types", nb.virtualization.cluster_types.all(), self._sync_cluster_types, commit)
-        self._sync_objects("Clusters", nb.virtualization.clusters.all(), self._sync_clusters, commit)
-        self._sync_objects("Virtual Machines", nb.virtualization.virtual_machines.all(), self._sync_virtual_machines, commit)
-        self._sync_objects("Providers", nb.circuits.providers.all(), self._sync_providers, commit)
-        self._sync_objects("Circuit Types", nb.circuits.circuit_types.all(), self._sync_circuit_types, commit)
-        self._sync_objects("Circuits", nb.circuits.circuits.all(), self._sync_circuits, commit)
-        self._sync_objects("Wireless LAN Groups", nb.wireless.wireless_lan_groups.all(), self._sync_wireless_lan_groups, commit)
-        self._sync_objects("Wireless LANs", nb.wireless.wireless_lans.all(), self._sync_wireless_lans, commit)
-        self._sync_objects("Tags", nb.extras.tags.all(), self._sync_tags, commit)
-        self._sync_objects("Config Contexts", nb.extras.config_contexts.all(), self._sync_config_contexts, commit)
+        # Define sync groups (dependency-aware)
+        sync_groups = [
+            # Group 1: Independent objects
+            [
+                ("Manufacturers", nb.dcim.manufacturers.all(), self._sync_manufacturers),
+                ("Device Roles", nb.dcim.device_roles.all(), self._sync_device_roles),
+                ("Platforms", nb.dcim.platforms.all(), self._sync_platforms),
+                ("Rack Roles", nb.dcim.rack_roles.all(), self._sync_rack_roles),
+                ("Tags", nb.extras.tags.all(), self._sync_tags),
+                ("Config Contexts", nb.extras.config_contexts.all(), self._sync_config_contexts),
+            ],
+            # Group 2: Device types and module types
+            [
+                ("Device Types", nb.dcim.device_types.all(), self._sync_device_types),
+                ("Module Types", nb.dcim.module_types.all(), self._sync_module_types),
+            ],
+            # Group 3: Regions, Sites, Locations, Racks
+            [
+                ("Regions", nb.dcim.regions.all(), self._sync_regions),
+                ("Site Groups", nb.dcim.site_groups.all(), self._sync_site_groups),
+                ("Sites", nb.dcim.sites.all(), self._sync_sites),
+                ("Locations", nb.dcim.locations.all(), self._sync_locations),
+                ("Racks", nb.dcim.racks.all(), self._sync_racks),
+            ],
+            # Group 4: Devices, Modules, Interfaces
+            [
+                ("Devices", nb.dcim.devices.all(), self._sync_devices),
+                ("Modules", nb.dcim.modules.all(), self._sync_modules),
+                ("Interfaces", nb.dcim.interfaces.all(), self._sync_interfaces),
+            ],
+            # Group 5: IPAM
+            [
+                ("VRFs", nb.ipam.vrfs.all(), self._sync_vrfs),
+                ("Prefixes", nb.ipam.prefixes.all(), self._sync_prefixes),
+                ("VLAN Groups", nb.ipam.vlan_groups.all(), self._sync_vlan_groups),
+                ("VLANs", nb.ipam.vlans.all(), self._sync_vlans),
+                ("IP Addresses", nb.ipam.ip_addresses.all(), self._sync_ip_addresses),
+            ],
+            # Group 6: Virtualization
+            [
+                ("Cluster Types", nb.virtualization.cluster_types.all(), self._sync_cluster_types),
+                ("Clusters", nb.virtualization.clusters.all(), self._sync_clusters),
+                ("Virtual Machines", nb.virtualization.virtual_machines.all(), self._sync_virtual_machines),
+            ],
+            # Group 7: Circuits
+            [
+                ("Providers", nb.circuits.providers.all(), self._sync_providers),
+                ("Circuit Types", nb.circuits.circuit_types.all(), self._sync_circuit_types),
+                ("Circuits", nb.circuits.circuits.all(), self._sync_circuits),
+            ],
+            # Group 8: Wireless
+            [
+                ("Wireless LAN Groups", nb.wireless.wireless_lan_groups.all(), self._sync_wireless_lan_groups),
+                ("Wireless LANs", nb.wireless.wireless_lans.all(), self._sync_wireless_lans),
+            ]
+        ]
+
+        # Execute groups sequentially, but objects inside each group in parallel
+        for group in sync_groups:
+            with ThreadPoolExecutor(max_workers=data['thread_count']) as executor:
+                futures = {executor.submit(func, fetch(), commit): name for name, fetch, func in group}
+                for future in as_completed(futures):
+                    name = futures[future]
+                    try:
+                        future.result()
+                        self.log_success(f"{name} synced successfully.")
+                    except Exception as e:
+                        self.log_failure(f"Failed to sync {name}: {e}")
 
         self.log_success("Full sync completed successfully!")
 
@@ -102,18 +142,10 @@ class FullSyncFromProduction(Script):
             except Exception as e:
                 self.log_warning(f"Could not wipe {model.__name__}: {e}")
 
-    def _sync_objects(self, name, queryset, func, commit):
-        try:
-            self.log_info(f"Syncing {name}...")
-            func(queryset, commit)
-            self.log_success(f"{name} synced successfully.")
-        except Exception as e:
-            self.log_failure(f"Failed to sync {name}: {e}")
-
     def _slug(self, value):
         return slugify(value) if value else None
 
-    # Sync functions with safe checks
+    # Sync functions (same as previous corrected version)
     def _sync_manufacturers(self, manufacturers, commit):
         for m in manufacturers:
             if commit:
