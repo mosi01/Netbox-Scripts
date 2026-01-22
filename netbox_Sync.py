@@ -21,7 +21,7 @@ class FullSyncFromProduction(Script):
         name = "Full Sync from Production"
         description = "Sync all major NetBox objects from production to dev environment in correct dependency order."
 
-    prod_url = StringVar(description="Production NetBox API URL", default="https://netbox.contoso.com")
+    prod_url = StringVar(description="Production NetBox API URL", default="https://netbox.lindab.com")
     api_key = StringVar(description="API Key (first part)")
     api_token = StringVar(description="API Token (second part)")
     ca_cert_path = StringVar(description="Path to CA certificate (optional)", required=False)
@@ -45,37 +45,16 @@ class FullSyncFromProduction(Script):
         # Full wipe
         if data['full_wipe'] and commit:
             self.log_warning("Performing FULL WIPE of dev environment...")
-            with transaction.atomic():                
+            with transaction.atomic():
                 self._wipe_models([
-                    Interface,
-                    Module,
-                    Device,
-                    DeviceType,
-                    ModuleType,
-                    Rack,
-                    Location,
-                    Site,
-                    SiteGroup,
-                    Region,
-                    RackRole,
-                    DeviceRole,
-                    Platform,
-                    Manufacturer,
-                    IPAddress,
-                    Prefix,
-                    VLAN,
-                    VLANGroup,
-                    VRF,
-                    VirtualMachine,
-                    Cluster,
-                    ClusterType,
-                    Circuit,
-                    CircuitType,
-                    Provider,
-                    WirelessLAN,
-                    WirelessLANGroup,
-                    ConfigContext,
-                    Tag
+                    Interface, Module, Device, DeviceType, ModuleType,
+                    Rack, Location, Site, SiteGroup, Region,
+                    RackRole, DeviceRole, Platform, Manufacturer,
+                    IPAddress, Prefix, VLAN, VLANGroup, VRF,
+                    VirtualMachine, Cluster, ClusterType,
+                    Circuit, CircuitType, Provider,
+                    WirelessLAN, WirelessLANGroup,
+                    ConfigContext, Tag
                 ])
             self.log_success("Full wipe completed.")
 
@@ -114,7 +93,6 @@ class FullSyncFromProduction(Script):
 
         self.log_success("Full sync completed successfully!")
 
-
     def _wipe_models(self, models):
         for model in models:
             count = model.objects.count()
@@ -124,7 +102,6 @@ class FullSyncFromProduction(Script):
             except Exception as e:
                 self.log_warning(f"Could not wipe {model.__name__}: {e}")
 
-
     def _sync_objects(self, name, queryset, func, commit):
         try:
             self.log_info(f"Syncing {name}...")
@@ -133,98 +110,114 @@ class FullSyncFromProduction(Script):
         except Exception as e:
             self.log_failure(f"Failed to sync {name}: {e}")
 
-    # Utility: Generate slug if missing
     def _slug(self, value):
         return slugify(value) if value else None
 
-    # Sync functions
+    # Sync functions with safe checks
     def _sync_manufacturers(self, manufacturers, commit):
         for m in manufacturers:
             if commit:
-                Manufacturer.objects.update_or_create(name=m.name, defaults={'slug': self._slug(m.slug or m.name)})
+                Manufacturer.objects.update_or_create(name=m.name, defaults={'slug': self._slug(getattr(m, "slug", None) or m.name)})
 
     def _sync_device_roles(self, roles, commit):
         for role in roles:
             if commit:
-                DeviceRole.objects.update_or_create(name=role.name, defaults={'slug': self._slug(role.slug or role.name)})
+                DeviceRole.objects.update_or_create(name=role.name, defaults={'slug': self._slug(getattr(role, "slug", None) or role.name)})
 
     def _sync_platforms(self, platforms, commit):
         for p in platforms:
             if commit:
-                Platform.objects.update_or_create(name=p.name, defaults={'slug': self._slug(p.slug or p.name)})
+                Platform.objects.update_or_create(name=p.name, defaults={'slug': self._slug(getattr(p, "slug", None) or p.name)})
 
     def _sync_device_types(self, device_types, commit):
         for dt in device_types:
             if commit:
-                manufacturer = Manufacturer.objects.filter(name=dt.manufacturer.name).first() if dt.manufacturer else None
+                manufacturer = Manufacturer.objects.filter(name=getattr(dt.manufacturer, "name", None)).first() if dt.manufacturer else None
+                slug = self._slug(getattr(dt, "slug", None) or dt.model)
                 if manufacturer:
-                    DeviceType.objects.update_or_create(model=dt.model, defaults={'manufacturer': manufacturer, 'slug': self._slug(dt.slug or dt.model)})
+                    DeviceType.objects.update_or_create(model=dt.model, defaults={'manufacturer': manufacturer, 'slug': slug})
+                else:
+                    self.log_warning(f"Skipping DeviceType {dt.model}: Manufacturer missing.")
 
     def _sync_module_types(self, module_types, commit):
         for mt in module_types:
             if commit:
-                manufacturer = Manufacturer.objects.filter(name=mt.manufacturer.name).first() if mt.manufacturer else None
+                manufacturer = Manufacturer.objects.filter(name=getattr(mt.manufacturer, "name", None)).first() if mt.manufacturer else None
+                slug = self._slug(getattr(mt, "slug", None) or mt.model)
                 if manufacturer:
-                    ModuleType.objects.update_or_create(model=mt.model, defaults={'manufacturer': manufacturer, 'slug': self._slug(mt.slug or mt.model)})
+                    ModuleType.objects.update_or_create(model=mt.model, defaults={'manufacturer': manufacturer, 'slug': slug})
+                else:
+                    self.log_warning(f"Skipping ModuleType {mt.model}: Manufacturer missing.")
 
     def _sync_regions(self, regions, commit):
         for region in regions:
             if commit:
-                Region.objects.update_or_create(name=region.name, defaults={'slug': self._slug(region.slug or region.name)})
+                Region.objects.update_or_create(name=region.name, defaults={'slug': self._slug(getattr(region, "slug", None) or region.name)})
 
     def _sync_site_groups(self, site_groups, commit):
         for sg in site_groups:
             if commit:
-                SiteGroup.objects.update_or_create(name=sg.name, defaults={'slug': self._slug(sg.slug or sg.name)})
+                SiteGroup.objects.update_or_create(name=sg.name, defaults={'slug': self._slug(getattr(sg, "slug", None) or sg.name)})
 
     def _sync_sites(self, sites, commit):
         for site in sites:
             if commit:
-                region_obj = Region.objects.filter(name=site.region.name).first() if site.region else None
-                Site.objects.update_or_create(name=site.name, defaults={'slug': self._slug(site.slug or site.name), 'region': region_obj})
+                region_obj = Region.objects.filter(name=getattr(site.region, "name", None)).first() if site.region else None
+                Site.objects.update_or_create(name=site.name, defaults={'slug': self._slug(getattr(site, "slug", None) or site.name), 'region': region_obj})
 
     def _sync_locations(self, locations, commit):
         for loc in locations:
             if commit:
-                site_obj = Site.objects.filter(name=loc.site.name).first() if loc.site else None
+                site_obj = Site.objects.filter(name=getattr(loc.site, "name", None)).first() if loc.site else None
                 if site_obj:
-                    Location.objects.update_or_create(name=loc.name, defaults={'site': site_obj, 'slug': self._slug(loc.slug or loc.name)})
+                    Location.objects.update_or_create(name=loc.name, defaults={'site': site_obj, 'slug': self._slug(getattr(loc, "slug", None) or loc.name)})
+                else:
+                    self.log_warning(f"Skipping Location {loc.name}: Site missing.")
 
     def _sync_rack_roles(self, roles, commit):
         for role in roles:
             if commit:
-                RackRole.objects.update_or_create(name=role.name, defaults={'slug': self._slug(role.slug or role.name)})
+                RackRole.objects.update_or_create(name=role.name, defaults={'slug': self._slug(getattr(role, "slug", None) or role.name)})
 
     def _sync_racks(self, racks, commit):
         for rack in racks:
             if commit:
-                site_obj = Site.objects.filter(name=rack.site.name).first() if rack.site else None
+                site_obj = Site.objects.filter(name=getattr(rack.site, "name", None)).first() if rack.site else None
+                slug = self._slug(getattr(rack, "slug", None) or rack.name)
                 if site_obj:
-                    Rack.objects.update_or_create(name=rack.name, defaults={'site': site_obj, 'slug': self._slug(rack.slug or rack.name)})
+                    Rack.objects.update_or_create(name=rack.name, defaults={'site': site_obj, 'slug': slug})
+                else:
+                    self.log_warning(f"Skipping Rack {rack.name}: Site missing.")
 
     def _sync_devices(self, devices, commit):
         for device in devices:
             if commit:
-                site_obj = Site.objects.filter(name=device.site.name).first() if device.site else None
-                dtype_obj = DeviceType.objects.filter(model=device.device_type.model).first() if device.device_type else None
-                role_obj = DeviceRole.objects.filter(name=device.device_role.name).first() if device.device_role else None
+                site_obj = Site.objects.filter(name=getattr(device.site, "name", None)).first() if device.site else None
+                dtype_obj = DeviceType.objects.filter(model=getattr(device.device_type, "model", None)).first() if device.device_type else None
+                role_obj = DeviceRole.objects.filter(name=getattr(device.device_role, "name", None)).first() if getattr(device, "device_role", None) else None
                 if site_obj and dtype_obj and role_obj:
                     Device.objects.update_or_create(name=device.name, defaults={'site': site_obj, 'device_type': dtype_obj, 'role': role_obj})
+                else:
+                    self.log_warning(f"Skipping Device {device.name}: Missing site, type, or role.")
 
     def _sync_modules(self, modules, commit):
         for module in modules:
             if commit:
-                device_obj = Device.objects.filter(name=module.device.name).first() if module.device else None
-                mtype_obj = ModuleType.objects.filter(model=module.module_type.model).first() if module.module_type else None
+                device_obj = Device.objects.filter(name=getattr(module.device, "name", None)).first() if module.device else None
+                mtype_obj = ModuleType.objects.filter(model=getattr(module.module_type, "model", None)).first() if module.module_type else None
                 if device_obj and mtype_obj:
                     Module.objects.update_or_create(name=module.name, defaults={'device': device_obj, 'module_type': mtype_obj})
+                else:
+                    self.log_warning(f"Skipping Module {module.name}: Missing device or module type.")
 
     def _sync_interfaces(self, interfaces, commit):
         for iface in interfaces:
             if commit:
-                device_obj = Device.objects.filter(name=iface.device.name).first() if iface.device else None
+                device_obj = Device.objects.filter(name=getattr(iface.device, "name", None)).first() if iface.device else None
                 if device_obj:
                     Interface.objects.update_or_create(name=iface.name, defaults={'device': device_obj})
+                else:
+                    self.log_warning(f"Skipping Interface {iface.name}: Device missing.")
 
     def _sync_vrfs(self, vrfs, commit):
         for vrf in vrfs:
@@ -254,14 +247,16 @@ class FullSyncFromProduction(Script):
     def _sync_cluster_types(self, types, commit):
         for ct in types:
             if commit:
-                ClusterType.objects.update_or_create(name=ct.name, defaults={'slug': self._slug(ct.slug or ct.name)})
+                ClusterType.objects.update_or_create(name=ct.name, defaults={'slug': self._slug(getattr(ct, "slug", None) or ct.name)})
 
     def _sync_clusters(self, clusters, commit):
         for cluster in clusters:
             if commit:
-                ctype_obj = ClusterType.objects.filter(name=cluster.type.name).first() if cluster.type else None
+                ctype_obj = ClusterType.objects.filter(name=getattr(cluster.type, "name", None)).first() if cluster.type else None
                 if ctype_obj:
                     Cluster.objects.update_or_create(name=cluster.name, defaults={'type': ctype_obj})
+                else:
+                    self.log_warning(f"Skipping Cluster {cluster.name}: ClusterType missing.")
 
     def _sync_virtual_machines(self, vms, commit):
         for vm in vms:
@@ -271,25 +266,27 @@ class FullSyncFromProduction(Script):
     def _sync_providers(self, providers, commit):
         for provider in providers:
             if commit:
-                Provider.objects.update_or_create(name=provider.name, defaults={'slug': self._slug(provider.slug or provider.name)})
+                Provider.objects.update_or_create(name=provider.name, defaults={'slug': self._slug(getattr(provider, "slug", None) or provider.name)})
 
     def _sync_circuit_types(self, types, commit):
         for ct in types:
             if commit:
-                CircuitType.objects.update_or_create(name=ct.name, defaults={'slug': self._slug(ct.slug or ct.name)})
+                CircuitType.objects.update_or_create(name=ct.name, defaults={'slug': self._slug(getattr(ct, "slug", None) or ct.name)})
 
     def _sync_circuits(self, circuits, commit):
         for circuit in circuits:
             if commit:
-                provider_obj = Provider.objects.filter(name=circuit.provider.name).first() if circuit.provider else None
-                ctype_obj = CircuitType.objects.filter(name=circuit.type.name).first() if circuit.type else None
+                provider_obj = Provider.objects.filter(name=getattr(circuit.provider, "name", None)).first() if circuit.provider else None
+                ctype_obj = CircuitType.objects.filter(name=getattr(circuit.type, "name", None)).first() if circuit.type else None
                 if provider_obj and ctype_obj:
                     Circuit.objects.update_or_create(cid=circuit.cid, defaults={'provider': provider_obj, 'type': ctype_obj})
+                else:
+                    self.log_warning(f"Skipping Circuit {circuit.cid}: Missing provider or type.")
 
     def _sync_wireless_lan_groups(self, groups, commit):
         for group in groups:
             if commit:
-                WirelessLANGroup.objects.update_or_create(name=group.name, defaults={'slug': self._slug(group.slug or group.name)})
+                WirelessLANGroup.objects.update_or_create(name=group.name, defaults={'slug': self._slug(getattr(group, "slug", None) or group.name)})
 
     def _sync_wireless_lans(self, lans, commit):
         for lan in lans:
