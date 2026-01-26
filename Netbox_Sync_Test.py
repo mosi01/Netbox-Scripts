@@ -23,7 +23,7 @@ class TestSyncFromProduction(Script):
 
     prod_url = StringVar(
         description="Production NetBox API URL",
-        default="https://netbox.lindab.com",
+        default="https://netbox.domain.com",
     )
     api_key = StringVar(
         description="API Key (first part)"
