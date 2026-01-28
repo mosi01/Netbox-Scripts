@@ -15,9 +15,10 @@ from extras.models import (
     SavedFilter,
     TableConfig,
     Tag,
-    ImageAttachment,
-    ObjectType,  # NetBox v4 proxy for content types
+    ImageAttachment
 )
+
+from netbox.models import ObjectType
 
 
 class SyncExtrasFromProduction(Script):
