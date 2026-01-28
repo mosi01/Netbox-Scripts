@@ -15,10 +15,8 @@ from extras.models import (
     SavedFilter,
     TableConfig,
     Tag,
-    ImageAttachment
+    ImageAttachment,
 )
-
-from netbox.models import ObjectType
 
 
 class SyncExtrasFromProduction(Script):
@@ -33,7 +31,7 @@ class SyncExtrasFromProduction(Script):
         commit_default = False
 
     #
-    # Script input variables (same base as TestSyncFromProduction)
+    # Script input variables (same base style as TestSyncFromProduction)
     #
     prod_url = StringVar(
         description="Production NetBox API URL",
@@ -76,29 +74,32 @@ class SyncExtrasFromProduction(Script):
         if data["disable_ssl_verify"]:
             self.log_warning("SSL verification is DISABLED. This is insecure!")
             nb.http_session.verify = False
+            self._remote_verify = False
         elif data.get("ca_cert_path"):
             nb.http_session.verify = data["ca_cert_path"]
+            self._remote_verify = data["ca_cert_path"]
         else:
             nb.http_session.verify = True
+            self._remote_verify = True
+
+        # Store base URL for image downloads
+        self._remote_base_url = data["prod_url"].rstrip("/")
 
         return nb
 
-    def _get_object_type_from_remote(self, ot_data):
+    def _get_content_type_from_remote(self, ot_data):
         """
         Map a remote ObjectType/ContentType representation (dict or pynetbox Record)
-        to a local extras.ObjectType instance.
+        to a local django.contrib.contenttypes.models.ContentType instance.
         """
         if not ot_data:
             return None
 
-        # ot_data may be a pynetbox Record or a plain dict
-        app_label = getattr(ot_data, "app_label", None) or getattr(
-            ot_data, "app", None
-        )
+        app_label = getattr(ot_data, "app_label", None) or getattr(ot_data, "app", None)
         model = getattr(ot_data, "model", None)
 
+        # ot_data may be a pynetbox Record with .dict(), or a plain dict
         if hasattr(ot_data, "dict"):
-            # Some pynetbox records can be cast to dict
             d = ot_data.dict()
             app_label = d.get("app_label") or d.get("app") or app_label
             model = d.get("model") or model
@@ -109,31 +110,21 @@ class SyncExtrasFromProduction(Script):
         if not app_label or not model:
             return None
 
-        # NetBox v4: ObjectType proxy model; fallback to ContentType if needed.
-        try:
-            return ObjectType.objects.filter(app_label=app_label, model=model).first()
-        except Exception:
-            ct = ContentType.objects.filter(app_label=app_label, model=model).first()
-            if ct:
-                try:
-                    return ObjectType.objects.get_for_model(ct.model_class())
-                except Exception:
-                    return None
-        return None
+        return ContentType.objects.filter(app_label=app_label, model=model).first()
 
-    def _map_object_types_list(self, remote_list):
+    def _map_content_types_list(self, remote_list):
         """
         Map a list of remote object type “stubs” (as returned by API) to
-        local ObjectType instances.
+        local ContentType instances.
         """
         if not remote_list:
             return []
-        local_ots = []
+        local_cts = []
         for ot in remote_list:
-            local_ot = self._get_object_type_from_remote(ot)
-            if local_ot and local_ot not in local_ots:
-                local_ots.append(local_ot)
-        return local_ots
+            ct = self._get_content_type_from_remote(ot)
+            if ct and ct not in local_cts:
+                local_cts.append(ct)
+        return local_cts
 
     #
     # Main
@@ -220,9 +211,9 @@ class SyncExtrasFromProduction(Script):
         Key: name
         """
         for r in records:
-            # Map content types
+            # Map content types (remote -> local ContentType)
             remote_cts = getattr(r, "content_types", None) or []
-            local_ots = self._map_object_types_list(remote_cts)
+            local_cts = self._map_content_types_list(remote_cts)
 
             defaults = {
                 "weight": getattr(r, "weight", 100),
@@ -239,8 +230,9 @@ class SyncExtrasFromProduction(Script):
                     name=r.name,
                     defaults=defaults,
                 )
-                if local_ots:
-                    obj.content_types.set(local_ots)
+                if local_cts:
+                    # Use primary keys so we don't need ObjectType proxy
+                    obj.content_types.set([ct.pk for ct in local_cts])
             else:
                 self.log_info(f"Would sync CustomLink: {r.name}")
 
@@ -280,7 +272,6 @@ class SyncExtrasFromProduction(Script):
             choice_set = getattr(cf, "choice_set", None)
             choice_set_obj = None
             if choice_set:
-                # choice_set may be a nested representation with name/slug
                 cs_name = getattr(choice_set, "name", None)
                 if hasattr(choice_set, "dict"):
                     d = choice_set.dict()
@@ -315,13 +306,13 @@ class SyncExtrasFromProduction(Script):
                     defaults=defaults,
                 )
 
-                # Map object_types / content_types M2M
+                # Map object_types / content_types M2M -> local ContentType
                 remote_ots = getattr(cf, "object_types", None) or getattr(
                     cf, "content_types", None
                 )
-                local_ots = self._map_object_types_list(remote_ots)
-                if local_ots:
-                    cf_obj.object_types.set(local_ots)
+                local_cts = self._map_content_types_list(remote_ots)
+                if local_cts:
+                    cf_obj.object_types.set([ct.pk for ct in local_cts])
             else:
                 self.log_info(f"Would sync CustomField: {cf.name}")
 
@@ -332,9 +323,9 @@ class SyncExtrasFromProduction(Script):
         """
         for et in records:
             remote_ct = getattr(et, "content_type", None)
-            local_ot = self._get_object_type_from_remote(remote_ct)
+            local_ct = self._get_content_type_from_remote(remote_ct)
 
-            if not local_ot:
+            if not local_ct:
                 self.log_warning(
                     f"Skipping ExportTemplate '{et.name}' (no matching content_type)."
                 )
@@ -351,7 +342,7 @@ class SyncExtrasFromProduction(Script):
             if commit:
                 ExportTemplate.objects.update_or_create(
                     name=et.name,
-                    content_type=local_ot,
+                    content_type_id=local_ct.pk,  # use pk instead of ObjectType
                     defaults=defaults,
                 )
             else:
@@ -367,8 +358,8 @@ class SyncExtrasFromProduction(Script):
         """
         for sf in records:
             remote_ct = getattr(sf, "content_type", None)
-            local_ot = self._get_object_type_from_remote(remote_ct)
-            if not local_ot:
+            local_ct = self._get_content_type_from_remote(remote_ct)
+            if not local_ct:
                 self.log_warning(
                     f"Skipping SavedFilter '{sf.name}' (no matching content_type)."
                 )
@@ -383,7 +374,7 @@ class SyncExtrasFromProduction(Script):
             if commit:
                 SavedFilter.objects.update_or_create(
                     name=sf.name,
-                    content_type=local_ot,
+                    content_type_id=local_ct.pk,
                     defaults=defaults,
                 )
             else:
@@ -399,8 +390,8 @@ class SyncExtrasFromProduction(Script):
         """
         for tc in records:
             remote_ct = getattr(tc, "content_type", None)
-            local_ot = self._get_object_type_from_remote(remote_ct)
-            if not local_ot:
+            local_ct = self._get_content_type_from_remote(remote_ct)
+            if not local_ct:
                 self.log_warning(
                     f"Skipping TableConfig '{tc.name}' (no matching content_type)."
                 )
@@ -415,7 +406,7 @@ class SyncExtrasFromProduction(Script):
             if commit:
                 TableConfig.objects.update_or_create(
                     name=tc.name,
-                    content_type=local_ot,
+                    content_type_id=local_ct.pk,
                     defaults=defaults,
                 )
             else:
@@ -454,13 +445,10 @@ class SyncExtrasFromProduction(Script):
         if not records:
             return
 
-        # Base URL for media; if remote "image" is already absolute, we'll use it directly.
-        base_url = self.prod_url
-
         for img in records:
             remote_ct = getattr(img, "content_type", None)
-            local_ot = self._get_object_type_from_remote(remote_ct)
-            if not local_ot:
+            local_ct = self._get_content_type_from_remote(remote_ct)
+            if not local_ct:
                 self.log_warning(
                     f"Skipping ImageAttachment '{getattr(img, 'name', 'unnamed')}' "
                     f"(no matching content_type)."
@@ -479,7 +467,7 @@ class SyncExtrasFromProduction(Script):
 
             # Make image URL absolute if needed
             if not image_url.startswith("http"):
-                image_url = base_url.rstrip("/") + image_url
+                image_url = self._remote_base_url + image_url
 
             if not commit:
                 self.log_info(
@@ -489,7 +477,7 @@ class SyncExtrasFromProduction(Script):
                 continue
 
             try:
-                resp = requests.get(image_url, verify=not self.disable_ssl_verify)
+                resp = requests.get(image_url, verify=self._remote_verify)
                 resp.raise_for_status()
             except Exception as e:
                 self.log_warning(
@@ -501,7 +489,7 @@ class SyncExtrasFromProduction(Script):
 
             ia, created = ImageAttachment.objects.get_or_create(
                 name=getattr(img, "name", filename),
-                content_type=local_ot,
+                content_type_id=local_ct.pk,
                 object_id=object_id,
             )
 
