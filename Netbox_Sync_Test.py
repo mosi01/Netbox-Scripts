@@ -12,6 +12,7 @@ from virtualization.models import VirtualMachine, Cluster, ClusterType
 from extras.models import ConfigContext, Tag
 
 
+
 class TestSyncFromProduction(Script):
     class Meta:
         name = "Test Sync from Production (Sample Only)"
@@ -52,6 +53,21 @@ class TestSyncFromProduction(Script):
         description="Number of virtual machines to sync",
         default=10,
     )
+
+    #
+    # Helper
+    #
+    def _get_sample(self, queryset, limit):
+        """
+        Returnerar de första `limit` objekten från en pynetbox-queryset
+        utan att iterera igenom hela API-resursen.
+        """
+        results = []
+        for obj in queryset:
+            results.append(obj)
+            if len(results) >= limit:
+                break
+        return results
 
     #
     # Main
@@ -105,9 +121,9 @@ class TestSyncFromProduction(Script):
         device_limit = data.get("device_limit") or 10
         vm_limit = data.get("vm_limit") or 10
 
-        # Sample devices & VMs from production
-        sample_devices = list(nb.dcim.devices.filter(limit=device_limit))
-        sample_vms = list(nb.virtualization.virtual_machines.filter(limit=vm_limit))
+        # Hämta endast de första N devices och N VMs
+        sample_devices = self._get_sample(nb.dcim.devices.all(), device_limit)
+        sample_vms = self._get_sample(nb.virtualization.virtual_machines.all(), vm_limit)
 
         self.log_info(f"Sample size: {len(sample_devices)} devices, {len(sample_vms)} virtual machines.")
 
@@ -176,7 +192,7 @@ class TestSyncFromProduction(Script):
         remote_interfaces = []
 
         if sample_devices:
-            # Fetch modules/interfaces per device (small numbers -> fine)
+            # Fetch modules/interfaces per device (small numbers -> OK)
             for d in sample_devices:
                 dev_modules = list(nb.dcim.modules.filter(device_id=d.id))
                 for m in dev_modules:
