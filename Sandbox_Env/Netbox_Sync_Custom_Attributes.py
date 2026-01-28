@@ -231,7 +231,7 @@ class SyncExtrasFromProduction(Script):
                     defaults=defaults,
                 )
                 if local_cts:
-                    # Use primary keys so we don't need ObjectType proxy
+                    # Use primary keys; ObjectType is a proxy for ContentType
                     obj.content_types.set([ct.pk for ct in local_cts])
             else:
                 self.log_info(f"Would sync CustomLink: {r.name}")
@@ -243,7 +243,6 @@ class SyncExtrasFromProduction(Script):
         """
         for cs in records:
             defaults = {
-                "slug": self._slug(getattr(cs, "slug", None) or cs.name),
                 "description": getattr(cs, "description", "") or "",
                 "extra_choices": getattr(cs, "extra_choices", []) or [],
                 "base_choices": getattr(cs, "base_choices", None),
