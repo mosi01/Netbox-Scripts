@@ -11,8 +11,6 @@ from dcim.models import (
 from virtualization.models import VirtualMachine, Cluster, ClusterType
 from extras.models import ConfigContext, Tag
 
-
-
 class TestSyncFromProduction(Script):
     class Meta:
         name = "Test Sync from Production (Sample Only)"
@@ -46,11 +44,11 @@ class TestSyncFromProduction(Script):
     )
 
     device_limit = IntegerVar(
-        description="Number of devices to sync",
+        description="Number of devices to sync (sample size)",
         default=10,
     )
     vm_limit = IntegerVar(
-        description="Number of virtual machines to sync",
+        description="Number of virtual machines to sync (sample size)",
         default=10,
     )
 
@@ -60,14 +58,28 @@ class TestSyncFromProduction(Script):
     def _get_sample(self, queryset, limit):
         """
         Returnerar de första `limit` objekten från en pynetbox-queryset
-        utan att iterera igenom hela API-resursen.
+        utan att iterera igenom hela API-resursen *logiskt*.
+        (Pynetbox kan fortfarande hämta en sida i taget internt, men vi
+        begränsar vilka objekt vi använder.)
         """
         results = []
-        for obj in queryset:
-            results.append(obj)
-            if len(results) >= limit:
+        for idx, obj in enumerate(queryset):
+            if idx >= limit:
                 break
+            results.append(obj)
         return results
+
+    def _wipe_models(self, models):
+        for model in models:
+            count = model.objects.count()
+            try:
+                model.objects.all().delete()
+                self.log_info(f"Wiped {count} objects from {model.__name__}")
+            except Exception as e:
+                self.log_warning(f"Could not wipe {model.__name__}: {e}")
+
+    def _slug(self, value):
+        return slugify(value) if value else None
 
     #
     # Main
@@ -118,12 +130,26 @@ class TestSyncFromProduction(Script):
 
         self.log_info("Fetching sample objects from production...")
 
-        device_limit = data.get("device_limit") or 10
-        vm_limit = data.get("vm_limit") or 10
+        # Läs in värden från formuläret
+        device_limit = int(data.get("device_limit") or 10)
+        vm_limit = int(data.get("vm_limit") or 10)
+        self.log_info(f"Requested limits from form: devices={device_limit}, vms={vm_limit}")
 
         # Hämta endast de första N devices och N VMs
-        sample_devices = self._get_sample(nb.dcim.devices.all(), device_limit)
-        sample_vms = self._get_sample(nb.virtualization.virtual_machines.all(), vm_limit)
+        # OBS: ingen filter(limit=...) här längre
+        all_devices_qs = nb.dcim.devices.all()
+        all_vms_qs = nb.virtualization.virtual_machines.all()
+
+        sample_devices = self._get_sample(all_devices_qs, device_limit)
+        sample_vms = self._get_sample(all_vms_qs, vm_limit)
+
+        # Sanity-check
+        if len(sample_devices) > device_limit or len(sample_vms) > vm_limit:
+            self.log_warning(
+                f"Sample size exceeded requested limit(s)! "
+                f"(devices={len(sample_devices)}/{device_limit}, "
+                f"vms={len(sample_vms)}/{vm_limit})"
+            )
 
         self.log_info(f"Sample size: {len(sample_devices)} devices, {len(sample_vms)} virtual machines.")
 
@@ -251,7 +277,7 @@ class TestSyncFromProduction(Script):
         )
 
         #
-        # Now sync in dependency order using the SAME mapping logic as full script
+        # Sync in dependency order
         #
 
         sync_plan = [
@@ -286,7 +312,6 @@ class TestSyncFromProduction(Script):
                 if commit:
                     with transaction.atomic():
                         func(records, commit)
-                # If not commit, we do nothing (no DB writes)
                 self.log_success(f"{name} synced successfully.")
             except Exception as e:
                 self.log_failure(f"Failed to sync {name}: {e}")
@@ -294,23 +319,7 @@ class TestSyncFromProduction(Script):
         self.log_success("Test sample sync completed.")
 
     #
-    # Shared helper + sync methods (identical to full script)
-    #
-
-    def _wipe_models(self, models):
-        for model in models:
-            count = model.objects.count()
-            try:
-                model.objects.all().delete()
-                self.log_info(f"Wiped {count} objects from {model.__name__}")
-            except Exception as e:
-                self.log_warning(f"Could not wipe {model.__name__}: {e}")
-
-    def _slug(self, value):
-        return slugify(value) if value else None
-
-    #
-    # The following methods are copied from FullSyncFromProduction to keep behaviour identical
+    # Sync methods (oförändrade)
     #
 
     def _sync_manufacturers(self, manufacturers, commit):
