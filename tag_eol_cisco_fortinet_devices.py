@@ -13,18 +13,20 @@ Purpose:
             - Do not load or use Cisco CSV
     - Fortinet:
         * Use Fortinet EOL CSV only
-    - Tag EOL/EOS devices with "EOL"
-    - Print detailed logs and counters
+    - Tag devices as EOL if their lifecycle date is in the past
+    - Treat products as OK if the lifecycle column says SUPPORTED
+    - Treat products as OK if lifecycle date is in the future
+    - Print detailed counters
 
-Recommended Cisco CSV example:
-    Product,LastDateOfSupport
-    C9300-48P,2029-10-31
-    ISR4331/K9,2026-12-31
+CSV format expected for both Cisco and Fortinet:
+    Product,End of Life
+    MX250,SUPPORTED
+    MS225,2031-04-30
+    AIR-AP2802I,2028-03-31
 
-Recommended Fortinet CSV example:
-    Product,End of Support
-    FG-100F,2030-01-01
-    FG-200E,2028-06-30
+The headers are configurable in the script form:
+    Product column       default: Product
+    End of Life column   default: End of Life
 """
 
 from __future__ import annotations
@@ -49,9 +51,19 @@ from extras.scripts import Script, StringVar, BooleanVar
 class TagEOLCiscoFortinetDevices(Script):
     """
     Tags Cisco and Fortinet devices as EOL based on:
-      - Cisco CSV only when Use API is unchecked
-      - Cisco API only when Use API is checked
-      - Fortinet CSV only
+
+    Cisco:
+        - CSV only when Use API is unchecked
+        - API only when Use API is checked
+
+    Fortinet:
+        - CSV only
+
+    CSV logic:
+        - If End of Life column contains SUPPORTED => OK / supported
+        - If End of Life column contains a future date => OK / supported
+        - If End of Life column contains a past date => EOL
+        - If product is missing from CSV/API => No lifecycle match
     """
 
     # ---------------------------------------------------------------------
@@ -70,7 +82,7 @@ class TagEOLCiscoFortinetDevices(Script):
 
     # ---------------------------------------------------------------------
     # Cisco API inputs
-    # Not mandatory in the form
+    # Not mandatory
     # ---------------------------------------------------------------------
 
     cisco_client_id = StringVar(
@@ -93,8 +105,8 @@ class TagEOLCiscoFortinetDevices(Script):
     )
 
     # ---------------------------------------------------------------------
-    # Cisco CSV inputs
-    # Not mandatory in the form
+    # CSV paths
+    # Not mandatory
     # ---------------------------------------------------------------------
 
     cisco_csv_path = StringVar(
@@ -107,57 +119,37 @@ class TagEOLCiscoFortinetDevices(Script):
         required=False,
     )
 
-    cisco_identifier_column = StringVar(
-        label="Cisco CSV identifier column",
-        description=(
-            "Column name in the Cisco CSV that identifies the product or serial. "
-            "Examples: Product, PID, SKU, Model, Serial"
-        ),
-        default="Product",
-        required=False,
-    )
-
-    cisco_eol_date_column = StringVar(
-        label="Cisco CSV EOL date column",
-        description=(
-            "Column name in the Cisco CSV containing the EOL / Last Date of Support. "
-            "Examples: LastDateOfSupport, Last Date of Support, End of Support"
-        ),
-        default="LastDateOfSupport",
-        required=False,
-    )
-
-    # ---------------------------------------------------------------------
-    # Fortinet CSV inputs
-    # Not mandatory in the form
-    # ---------------------------------------------------------------------
-
     fortinet_csv_path = StringVar(
         label="Fortinet EOL CSV path",
         description=(
-            "Absolute path on the NetBox server to the Fortinet lifecycle CSV file. "
+            "Absolute path on the NetBox server to the Fortinet EOL CSV file. "
             "Example: /opt/netbox/netbox/scripts/Fortinet_EOL_260623.csv"
         ),
         required=False,
     )
 
-    fortinet_identifier_column = StringVar(
-        label="Fortinet CSV identifier column",
+    # ---------------------------------------------------------------------
+    # Shared CSV header configuration
+    # Applies to BOTH Cisco and Fortinet CSV files
+    # ---------------------------------------------------------------------
+
+    product_column = StringVar(
+        label="Product column",
         description=(
-            "Column name in the Fortinet CSV that identifies the product. "
-            "Examples: Product, SKU, Model, Part Number, Serial"
+            "CSV column containing the product identifier. "
+            "This same header is used for both Cisco and Fortinet CSV files."
         ),
         default="Product",
         required=False,
     )
 
-    fortinet_eol_date_column = StringVar(
-        label="Fortinet CSV EOL/EOS date column",
+    end_of_life_column = StringVar(
+        label="End of Life column",
         description=(
-            "Column name in the Fortinet CSV containing the End of Support / EOS date. "
-            "Examples: End of Support, EOS, End of Service Life"
+            "CSV column containing either an EOL/EOS date or the value SUPPORTED. "
+            "This same header is used for both Cisco and Fortinet CSV files."
         ),
-        default="End of Support",
+        default="End of Life",
         required=False,
     )
 
@@ -165,18 +157,17 @@ class TagEOLCiscoFortinetDevices(Script):
         name = "Tag Cisco / Fortinet EOL Devices"
         description = (
             "Checks Cisco EOL using either CSV or API depending on the 'Use API' checkbox. "
-            "Checks Fortinet EOL using CSV. Tags EOL devices with 'EOL' and prints counters."
+            "Checks Fortinet EOL using CSV. Treats SUPPORTED as OK. "
+            "Tags EOL devices with 'EOL' and prints counters."
         )
         field_order = [
             "use_api",
             "cisco_client_id",
             "cisco_client_secret",
             "cisco_csv_path",
-            "cisco_identifier_column",
-            "cisco_eol_date_column",
             "fortinet_csv_path",
-            "fortinet_identifier_column",
-            "fortinet_eol_date_column",
+            "product_column",
+            "end_of_life_column",
         ]
         commit_default = True
         scheduling_enabled = True
@@ -190,14 +181,12 @@ class TagEOLCiscoFortinetDevices(Script):
 
     def _clean_path(self, value):
         """
-        Clean path input from accidental surrounding quotes or trailing apostrophes.
+        Clean path input from accidental surrounding quotes or apostrophes.
         """
         if value is None:
             return ""
 
         value = str(value).strip()
-
-        # Remove surrounding quotes if user pasted them
         value = value.strip("'").strip('"').strip()
 
         return value
@@ -207,7 +196,7 @@ class TagEOLCiscoFortinetDevices(Script):
         Normalise identifiers for matching.
 
         Example:
-            " fg-100f " -> "FG-100F"
+            " mx250 " -> "MX250"
         """
         if value is None:
             return None
@@ -228,6 +217,8 @@ class TagEOLCiscoFortinetDevices(Script):
                 YYYY/MM/DD
                 DD-MM-YYYY
                 DD/MM/YYYY
+                Month DD, YYYY
+                Mon DD, YYYY
         """
         if value is None:
             return None
@@ -240,10 +231,19 @@ class TagEOLCiscoFortinetDevices(Script):
 
         value = str(value).strip()
 
-        if not value or value.upper() in {"-", "N/A", "NONE", "NULL"}:
+        if not value or value.upper() in {"-", "N/A", "NONE", "NULL", "SUPPORTED"}:
             return None
 
-        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
+        formats = (
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%d-%m-%Y",
+            "%d/%m/%Y",
+            "%B %d, %Y",
+            "%b %d, %Y",
+        )
+
+        for fmt in formats:
             try:
                 return datetime.strptime(value, fmt).date()
             except ValueError:
@@ -267,7 +267,6 @@ class TagEOLCiscoFortinetDevices(Script):
     def _ensure_eol_tag(self):
         """
         Ensure the NetBox tag 'EOL' exists.
-        Uses NetBox colour value f44336, which is red.
         """
         tag, _ = Tag.objects.get_or_create(
             slug="eol",
@@ -325,7 +324,7 @@ class TagEOLCiscoFortinetDevices(Script):
         return already_present
 
     # ---------------------------------------------------------------------
-    # Generic CSV loader
+    # CSV helpers
     # ---------------------------------------------------------------------
 
     def _detect_csv_dialect(self, file_path):
@@ -341,7 +340,33 @@ class TagEOLCiscoFortinetDevices(Script):
         except csv.Error:
             return csv.excel
 
-    def _load_lifecycle_csv(self, file_path, identifier_column, eol_date_column, label):
+    def _normalise_header(self, value):
+        """
+        Normalise CSV headers to improve matching.
+        """
+        if value is None:
+            return ""
+
+        return str(value).strip().lower()
+
+    def _resolve_csv_column(self, fieldnames, requested_column):
+        """
+        Resolve a CSV column name case-insensitively.
+
+        Example:
+            Requested: End of Life
+            CSV has:  end of life
+            => match
+        """
+        requested = self._normalise_header(requested_column)
+
+        for field in fieldnames:
+            if self._normalise_header(field) == requested:
+                return field
+
+        return None
+
+    def _load_lifecycle_csv(self, file_path, product_column, end_of_life_column, label):
         """
         Load lifecycle CSV into a dictionary.
 
@@ -349,7 +374,9 @@ class TagEOLCiscoFortinetDevices(Script):
             {
                 "NORMALISED_IDENTIFIER": {
                     "raw_identifier": "...",
-                    "eol_date": date(...),
+                    "raw_lifecycle_value": "...",
+                    "status": "supported" | "eol_date" | "unknown",
+                    "eol_date": date(...) or None,
                     "row": {...}
                 }
             }
@@ -371,11 +398,23 @@ class TagEOLCiscoFortinetDevices(Script):
             if not reader.fieldnames:
                 raise ValueError(f"{label} CSV is empty or missing headers.")
 
-            missing_columns = [
-                column
-                for column in [identifier_column, eol_date_column]
-                if column not in reader.fieldnames
-            ]
+            resolved_product_column = self._resolve_csv_column(
+                reader.fieldnames,
+                product_column,
+            )
+
+            resolved_end_of_life_column = self._resolve_csv_column(
+                reader.fieldnames,
+                end_of_life_column,
+            )
+
+            missing_columns = []
+
+            if not resolved_product_column:
+                missing_columns.append(product_column)
+
+            if not resolved_end_of_life_column:
+                missing_columns.append(end_of_life_column)
 
             if missing_columns:
                 raise ValueError(
@@ -384,23 +423,68 @@ class TagEOLCiscoFortinetDevices(Script):
                 )
 
             for row in reader:
-                raw_identifier = row.get(identifier_column)
+                raw_identifier = row.get(resolved_product_column)
                 key = self._normalise(raw_identifier)
 
                 if not key:
                     continue
 
+                raw_lifecycle_value = row.get(resolved_end_of_life_column)
+                raw_lifecycle_value_clean = (
+                    str(raw_lifecycle_value).strip()
+                    if raw_lifecycle_value is not None
+                    else ""
+                )
+
+                raw_lifecycle_value_upper = raw_lifecycle_value_clean.upper()
+
+                if "SUPPORTED" in raw_lifecycle_value_upper:
+                    status = "supported"
+                    parsed_date = None
+                else:
+                    parsed_date = self._parse_date(raw_lifecycle_value_clean)
+
+                    if parsed_date:
+                        status = "eol_date"
+                    else:
+                        status = "unknown"
+
                 lifecycle_map[key] = {
                     "raw_identifier": raw_identifier,
-                    "eol_date": self._parse_date(row.get(eol_date_column)),
+                    "raw_lifecycle_value": raw_lifecycle_value_clean,
+                    "status": status,
+                    "eol_date": parsed_date,
                     "row": row,
                 }
 
         return lifecycle_map
 
-    def _is_csv_eol(self, entry):
-        eol_date = entry.get("eol_date")
-        return bool(eol_date and eol_date <= self._today())
+    def _evaluate_csv_entry(self, entry):
+        """
+        Evaluate CSV lifecycle entry.
+
+        Returns:
+            "supported"
+            "eol"
+            "unknown"
+        """
+        status = entry.get("status")
+
+        if status == "supported":
+            return "supported"
+
+        if status == "eol_date":
+            eol_date = entry.get("eol_date")
+
+            if not eol_date:
+                return "unknown"
+
+            if eol_date <= self._today():
+                return "eol"
+
+            return "supported"
+
+        return "unknown"
 
     # ---------------------------------------------------------------------
     # Cisco API helpers
@@ -515,9 +599,24 @@ class TagEOLCiscoFortinetDevices(Script):
 
         return records_by_serial
 
-    def _is_cisco_api_eol(self, record):
+    def _evaluate_cisco_api_record(self, record):
+        """
+        Evaluate Cisco API record.
+
+        Returns:
+            "supported"
+            "eol"
+            "unknown"
+        """
         last_support = self._parse_date(record.get("LastDateOfSupport"))
-        return bool(last_support and last_support <= self._today())
+
+        if not last_support:
+            return "unknown"
+
+        if last_support <= self._today():
+            return "eol"
+
+        return "supported"
 
     # ---------------------------------------------------------------------
     # Main
@@ -532,14 +631,14 @@ class TagEOLCiscoFortinetDevices(Script):
         cisco_client_secret = (data.get("cisco_client_secret") or "").strip()
 
         cisco_csv_path = self._clean_path(data.get("cisco_csv_path") or "")
-        cisco_identifier_column = (data.get("cisco_identifier_column") or "Product").strip()
-        cisco_eol_date_column = (data.get("cisco_eol_date_column") or "LastDateOfSupport").strip()
-
         fortinet_csv_path = self._clean_path(data.get("fortinet_csv_path") or "")
-        fortinet_identifier_column = (data.get("fortinet_identifier_column") or "Product").strip()
-        fortinet_eol_date_column = (data.get("fortinet_eol_date_column") or "End of Support").strip()
+
+        product_column = (data.get("product_column") or "Product").strip()
+        end_of_life_column = (data.get("end_of_life_column") or "End of Life").strip()
 
         self.log_info(f"Cisco Use API mode: {use_api}")
+        self.log_info(f"CSV Product column: {product_column}")
+        self.log_info(f"CSV End of Life column: {end_of_life_column}")
 
         devices = (
             Device.objects
@@ -590,7 +689,6 @@ class TagEOLCiscoFortinetDevices(Script):
         # -----------------------------------------------------------------
 
         if use_api:
-            # Cisco API ONLY
             self.log_info("Cisco mode selected: API only. Cisco CSV will not be loaded.")
 
             if not cisco_client_id or not cisco_client_secret:
@@ -617,13 +715,19 @@ class TagEOLCiscoFortinetDevices(Script):
                     ]
 
                     if cisco_pids:
-                        cisco_records_by_pid = self._cisco_lookup_by_pid(token, cisco_pids)
+                        cisco_records_by_pid = self._cisco_lookup_by_pid(
+                            token,
+                            cisco_pids,
+                        )
                         self.log_info(
                             f"Cisco API PID lookups completed: {len(set(cisco_pids))} unique identifiers."
                         )
 
                     if cisco_serials:
-                        cisco_records_by_serial = self._cisco_lookup_by_serial(token, cisco_serials)
+                        cisco_records_by_serial = self._cisco_lookup_by_serial(
+                            token,
+                            cisco_serials,
+                        )
                         self.log_info(
                             f"Cisco API serial lookups completed: {len(set(cisco_serials))} unique serials."
                         )
@@ -640,7 +744,6 @@ class TagEOLCiscoFortinetDevices(Script):
                     )
 
         else:
-            # Cisco CSV ONLY
             self.log_info("Cisco mode selected: CSV only. Cisco API will not be called.")
 
             if not cisco_csv_path:
@@ -652,8 +755,8 @@ class TagEOLCiscoFortinetDevices(Script):
                 try:
                     cisco_csv_lifecycle = self._load_lifecycle_csv(
                         cisco_csv_path,
-                        cisco_identifier_column,
-                        cisco_eol_date_column,
+                        product_column,
+                        end_of_life_column,
                         "Cisco",
                     )
 
@@ -678,8 +781,8 @@ class TagEOLCiscoFortinetDevices(Script):
             try:
                 fortinet_lifecycle = self._load_lifecycle_csv(
                     fortinet_csv_path,
-                    fortinet_identifier_column,
-                    fortinet_eol_date_column,
+                    product_column,
+                    end_of_life_column,
                     "Fortinet",
                 )
 
@@ -698,11 +801,22 @@ class TagEOLCiscoFortinetDevices(Script):
 
         evaluated = 0
         skipped_due_to_missing_source = 0
+
         total_eol = 0
+        total_supported = 0
+        total_unknown = 0
 
         cisco_eol_api = 0
+        cisco_supported_api = 0
+        cisco_unknown_api = 0
+
         cisco_eol_csv = 0
+        cisco_supported_csv = 0
+        cisco_unknown_csv = 0
+
         fortinet_eol_csv = 0
+        fortinet_supported_csv = 0
+        fortinet_unknown_csv = 0
 
         newly_tagged = 0
         already_tagged = 0
@@ -738,6 +852,9 @@ class TagEOLCiscoFortinetDevices(Script):
 
                     if not api_record:
                         no_match += 1
+                        total_unknown += 1
+                        cisco_unknown_api += 1
+
                         self.log_warning(
                             f"[Cisco][API] No lifecycle match for device={device.name} | "
                             f"site={device.site.name if device.site else '-'} | "
@@ -745,7 +862,9 @@ class TagEOLCiscoFortinetDevices(Script):
                         )
                         continue
 
-                    if self._is_cisco_api_eol(api_record):
+                    api_status = self._evaluate_cisco_api_record(api_record)
+
+                    if api_status == "eol":
                         total_eol += 1
                         cisco_eol_api += 1
 
@@ -756,7 +875,9 @@ class TagEOLCiscoFortinetDevices(Script):
                         else:
                             newly_tagged += 1
 
-                        last_support = self._parse_date(api_record.get("LastDateOfSupport"))
+                        last_support = self._parse_date(
+                            api_record.get("LastDateOfSupport")
+                        )
 
                         self.log_success(
                             f"[Cisco][API][EOL] device={device.name} | "
@@ -764,6 +885,22 @@ class TagEOLCiscoFortinetDevices(Script):
                             f"identifier={identifier} | serial={serial} | "
                             f"last_date_of_support={last_support} | "
                             f"matched_pid={api_record.get('EOLProductID')}"
+                        )
+
+                    elif api_status == "supported":
+                        total_supported += 1
+                        cisco_supported_api += 1
+
+                    else:
+                        total_unknown += 1
+                        cisco_unknown_api += 1
+
+                        self.log_warning(
+                            f"[Cisco][API][UNKNOWN] device={device.name} | "
+                            f"site={device.site.name if device.site else '-'} | "
+                            f"identifier={identifier} | serial={serial} | "
+                            f"matched_pid={api_record.get('EOLProductID')} | "
+                            f"reason=No valid LastDateOfSupport"
                         )
 
                     continue
@@ -781,6 +918,9 @@ class TagEOLCiscoFortinetDevices(Script):
 
                 if not csv_entry:
                     no_match += 1
+                    total_unknown += 1
+                    cisco_unknown_csv += 1
+
                     self.log_warning(
                         f"[Cisco][CSV] No lifecycle match for device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
@@ -788,7 +928,9 @@ class TagEOLCiscoFortinetDevices(Script):
                     )
                     continue
 
-                if self._is_csv_eol(csv_entry):
+                csv_status = self._evaluate_csv_entry(csv_entry)
+
+                if csv_status == "eol":
                     total_eol += 1
                     cisco_eol_csv += 1
 
@@ -804,7 +946,24 @@ class TagEOLCiscoFortinetDevices(Script):
                         f"site={device.site.name if device.site else '-'} | "
                         f"identifier={identifier} | serial={serial} | "
                         f"csv_identifier={csv_entry.get('raw_identifier')} | "
+                        f"lifecycle_value={csv_entry.get('raw_lifecycle_value')} | "
                         f"eol_date={csv_entry.get('eol_date')}"
+                    )
+
+                elif csv_status == "supported":
+                    total_supported += 1
+                    cisco_supported_csv += 1
+
+                else:
+                    total_unknown += 1
+                    cisco_unknown_csv += 1
+
+                    self.log_warning(
+                        f"[Cisco][CSV][UNKNOWN] device={device.name} | "
+                        f"site={device.site.name if device.site else '-'} | "
+                        f"identifier={identifier} | serial={serial} | "
+                        f"csv_identifier={csv_entry.get('raw_identifier')} | "
+                        f"lifecycle_value={csv_entry.get('raw_lifecycle_value')}"
                     )
 
         # -----------------------------------------------------------------
@@ -832,6 +991,9 @@ class TagEOLCiscoFortinetDevices(Script):
 
                 if not entry:
                     no_match += 1
+                    total_unknown += 1
+                    fortinet_unknown_csv += 1
+
                     self.log_warning(
                         f"[Fortinet][CSV] No lifecycle match for device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
@@ -839,7 +1001,9 @@ class TagEOLCiscoFortinetDevices(Script):
                     )
                     continue
 
-                if self._is_csv_eol(entry):
+                csv_status = self._evaluate_csv_entry(entry)
+
+                if csv_status == "eol":
                     total_eol += 1
                     fortinet_eol_csv += 1
 
@@ -855,7 +1019,24 @@ class TagEOLCiscoFortinetDevices(Script):
                         f"site={device.site.name if device.site else '-'} | "
                         f"identifier={identifier} | serial={serial} | "
                         f"csv_identifier={entry.get('raw_identifier')} | "
+                        f"lifecycle_value={entry.get('raw_lifecycle_value')} | "
                         f"eol_date={entry.get('eol_date')}"
+                    )
+
+                elif csv_status == "supported":
+                    total_supported += 1
+                    fortinet_supported_csv += 1
+
+                else:
+                    total_unknown += 1
+                    fortinet_unknown_csv += 1
+
+                    self.log_warning(
+                        f"[Fortinet][CSV][UNKNOWN] device={device.name} | "
+                        f"site={device.site.name if device.site else '-'} | "
+                        f"identifier={identifier} | serial={serial} | "
+                        f"csv_identifier={entry.get('raw_identifier')} | "
+                        f"lifecycle_value={entry.get('raw_lifecycle_value')}"
                     )
 
         # -----------------------------------------------------------------
@@ -873,13 +1054,31 @@ class TagEOLCiscoFortinetDevices(Script):
             f"Cisco API authentication successful: {cisco_api_available}\n"
             f"Cisco CSV entries loaded: {len(cisco_csv_lifecycle)}\n"
             f"Fortinet CSV entries loaded: {len(fortinet_lifecycle)}\n"
-            f"EOL devices total: {total_eol}\n"
+            f"CSV Product column: {product_column}\n"
+            f"CSV End of Life column: {end_of_life_column}\n"
+            "\n"
+            "Lifecycle result totals:\n"
+            f" - EOL devices total: {total_eol}\n"
+            f" - Supported devices total: {total_supported}\n"
+            f" - Unknown lifecycle devices total: {total_unknown}\n"
+            "\n"
+            "Cisco details:\n"
             f" - Cisco EOL from API: {cisco_eol_api}\n"
+            f" - Cisco supported from API: {cisco_supported_api}\n"
+            f" - Cisco unknown from API: {cisco_unknown_api}\n"
             f" - Cisco EOL from CSV: {cisco_eol_csv}\n"
+            f" - Cisco supported from CSV: {cisco_supported_csv}\n"
+            f" - Cisco unknown from CSV: {cisco_unknown_csv}\n"
+            "\n"
+            "Fortinet details:\n"
             f" - Fortinet EOL from CSV: {fortinet_eol_csv}\n"
-            f"Newly tagged with EOL: {newly_tagged}\n"
-            f"Already tagged with EOL: {already_tagged}\n"
-            f"No lifecycle match: {no_match}\n"
+            f" - Fortinet supported from CSV: {fortinet_supported_csv}\n"
+            f" - Fortinet unknown from CSV: {fortinet_unknown_csv}\n"
+            "\n"
+            "Tagging:\n"
+            f" - Newly tagged with EOL: {newly_tagged}\n"
+            f" - Already tagged with EOL: {already_tagged}\n"
+            f" - No lifecycle match: {no_match}\n"
             f"Commit mode: {commit}\n"
         )
 
