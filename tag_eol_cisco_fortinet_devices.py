@@ -11,22 +11,24 @@ Purpose:
         * If "Use API" is checked:
             - Use Cisco API only
             - Do not load or use Cisco CSV
+
     - Fortinet:
         * Use Fortinet EOL CSV only
+
     - Tag devices as EOL if their lifecycle date is in the past
     - Treat products as OK if the lifecycle column says SUPPORTED
     - Treat products as OK if lifecycle date is in the future
-    - Print detailed counters
+    - Match devices using:
+        1. Device Type Part Number
+        2. Normalised Part Number variants
+        3. Device Type display/model name
+        4. Device Serial Number
 
 CSV format expected for both Cisco and Fortinet:
     Product,End of Life
     MX250,SUPPORTED
-    MS225,2031-04-30
-    AIR-AP2802I,2028-03-31
-
-The headers are configurable in the script form:
-    Product column       default: Product
-    End of Life column   default: End of Life
+    MS120-24P,2030-03-28
+    AIR-AP2802I-E-K9,2027-10-31
 """
 
 from __future__ import annotations
@@ -196,7 +198,7 @@ class TagEOLCiscoFortinetDevices(Script):
         Normalise identifiers for matching.
 
         Example:
-            " mx250 " -> "MX250"
+            " ms120-24p " -> "MS120-24P"
         """
         if value is None:
             return None
@@ -286,26 +288,135 @@ class TagEOLCiscoFortinetDevices(Script):
 
         return str(manufacturer.name).strip().lower()
 
-    def _device_identifier(self, device):
+    def _device_serial(self, device):
+        return self._normalise(getattr(device, "serial", None))
+
+    # ---------------------------------------------------------------------
+    # Identifier matching helpers
+    # ---------------------------------------------------------------------
+
+    def _normalised_part_number_variants(self, part_number):
         """
-        Preferred lifecycle identifier.
+        Generate useful part number variants.
+
+        Example:
+            MS120-24P-HW
+                -> MS120-24P-HW
+                -> MS120-24P
+
+            C9300L-24P-4G-E
+                -> C9300L-24P-4G-E
+                -> C9300L-24P-4G
+
+            AIR-AP2802I-E-K9
+                -> AIR-AP2802I-E-K9
+                -> AIR-AP2802I-E
+        """
+        variants = []
+
+        original = self._normalise(part_number)
+        if not original:
+            return variants
+
+        variants.append(original)
+
+        suffixes_to_strip = (
+            "-HW",
+            "-K9",
+            "-K9C",
+            "-E",
+            "-A",
+        )
+
+        for suffix in suffixes_to_strip:
+            if original.endswith(suffix):
+                stripped = original[: -len(suffix)]
+                if stripped:
+                    variants.append(stripped)
+
+        # Special Meraki style:
+        # MS120-24P-HW -> MS120-24P
+        if original.endswith("-HW"):
+            stripped_hw = original[:-3]
+            if stripped_hw:
+                variants.append(stripped_hw)
+
+        return list(dict.fromkeys([v for v in variants if v]))
+
+    def _device_product_identifiers(self, device):
+        """
+        Return product identifiers excluding serial number.
 
         Order:
             1. Device Type Part Number
-            2. Device Type Model
+            2. Normalised Part Number variants
+            3. Device Type display/model name
+
+        Used for:
+            - Cisco API Product ID calls
+            - CSV product matching
         """
+        identifiers = []
+
         device_type = getattr(device, "device_type", None)
 
         if not device_type:
-            return None
+            return identifiers
 
         part_number = getattr(device_type, "part_number", None)
-        model = getattr(device_type, "model", None)
 
-        return self._normalise(part_number or model)
+        if part_number:
+            identifiers.extend(self._normalised_part_number_variants(part_number))
 
-    def _device_serial(self, device):
-        return self._normalise(getattr(device, "serial", None))
+        # NetBox commonly uses model as the display name for device type.
+        # Some versions/objects may also expose display or display_name.
+        possible_display_values = [
+            getattr(device_type, "display", None),
+            getattr(device_type, "display_name", None),
+            getattr(device_type, "model", None),
+            str(device_type) if device_type else None,
+        ]
+
+        for value in possible_display_values:
+            normalised = self._normalise(value)
+            if normalised:
+                identifiers.append(normalised)
+
+        return list(dict.fromkeys([i for i in identifiers if i]))
+
+    def _device_lookup_identifiers(self, device):
+        """
+        Return all identifiers for lookup.
+
+        Order:
+            1. Device Type Part Number
+            2. Normalised Part Number variants
+            3. Device Type display/model name
+            4. Device Serial Number
+        """
+        identifiers = self._device_product_identifiers(device)
+
+        serial = self._device_serial(device)
+        if serial:
+            identifiers.append(serial)
+
+        return list(dict.fromkeys([i for i in identifiers if i]))
+
+    def _find_lifecycle_entry(self, lifecycle_map, identifiers):
+        """
+        Find the first matching lifecycle entry based on ordered identifiers.
+
+        Returns:
+            (matched_identifier, entry)
+
+        If no match:
+            (None, None)
+        """
+        for identifier in identifiers:
+            if identifier in lifecycle_map:
+                return identifier, lifecycle_map[identifier]
+
+        return None, None
 
     def _tag_device(self, device, tag, commit):
         """
@@ -352,11 +463,6 @@ class TagEOLCiscoFortinetDevices(Script):
     def _resolve_csv_column(self, fieldnames, requested_column):
         """
         Resolve a CSV column name case-insensitively.
-
-        Example:
-            Requested: End of Life
-            CSV has:  end of life
-            => match
         """
         requested = self._normalise_header(requested_column)
 
@@ -702,11 +808,10 @@ class TagEOLCiscoFortinetDevices(Script):
                     cisco_api_available = True
                     cisco_source_enabled = True
 
-                    cisco_pids = [
-                        self._device_identifier(device)
-                        for device in cisco_devices
-                        if self._device_identifier(device)
-                    ]
+                    cisco_pids = []
+
+                    for device in cisco_devices:
+                        cisco_pids.extend(self._device_product_identifiers(device))
 
                     cisco_serials = [
                         self._device_serial(device)
@@ -835,7 +940,8 @@ class TagEOLCiscoFortinetDevices(Script):
             for device in cisco_devices:
                 evaluated += 1
 
-                identifier = self._device_identifier(device)
+                product_identifiers = self._device_product_identifiers(device)
+                lookup_identifiers = self._device_lookup_identifiers(device)
                 serial = self._device_serial(device)
 
                 # ---------------------------------------------------------
@@ -844,10 +950,15 @@ class TagEOLCiscoFortinetDevices(Script):
 
                 if use_api:
                     api_record = None
+                    matched_identifier = None
 
-                    if identifier and identifier in cisco_records_by_pid:
-                        api_record = cisco_records_by_pid[identifier]
-                    elif serial and serial in cisco_records_by_serial:
+                    matched_identifier, api_record = self._find_lifecycle_entry(
+                        cisco_records_by_pid,
+                        product_identifiers,
+                    )
+
+                    if not api_record and serial and serial in cisco_records_by_serial:
+                        matched_identifier = serial
                         api_record = cisco_records_by_serial[serial]
 
                     if not api_record:
@@ -858,7 +969,7 @@ class TagEOLCiscoFortinetDevices(Script):
                         self.log_warning(
                             f"[Cisco][API] No lifecycle match for device={device.name} | "
                             f"site={device.site.name if device.site else '-'} | "
-                            f"identifier={identifier} | serial={serial}"
+                            f"tried_identifiers={', '.join(lookup_identifiers)}"
                         )
                         continue
 
@@ -882,7 +993,7 @@ class TagEOLCiscoFortinetDevices(Script):
                         self.log_success(
                             f"[Cisco][API][EOL] device={device.name} | "
                             f"site={device.site.name if device.site else '-'} | "
-                            f"identifier={identifier} | serial={serial} | "
+                            f"matched_identifier={matched_identifier} | "
                             f"last_date_of_support={last_support} | "
                             f"matched_pid={api_record.get('EOLProductID')}"
                         )
@@ -898,7 +1009,7 @@ class TagEOLCiscoFortinetDevices(Script):
                         self.log_warning(
                             f"[Cisco][API][UNKNOWN] device={device.name} | "
                             f"site={device.site.name if device.site else '-'} | "
-                            f"identifier={identifier} | serial={serial} | "
+                            f"matched_identifier={matched_identifier} | "
                             f"matched_pid={api_record.get('EOLProductID')} | "
                             f"reason=No valid LastDateOfSupport"
                         )
@@ -909,12 +1020,10 @@ class TagEOLCiscoFortinetDevices(Script):
                 # Cisco CSV ONLY mode
                 # ---------------------------------------------------------
 
-                csv_entry = None
-
-                if identifier and identifier in cisco_csv_lifecycle:
-                    csv_entry = cisco_csv_lifecycle[identifier]
-                elif serial and serial in cisco_csv_lifecycle:
-                    csv_entry = cisco_csv_lifecycle[serial]
+                matched_identifier, csv_entry = self._find_lifecycle_entry(
+                    cisco_csv_lifecycle,
+                    lookup_identifiers,
+                )
 
                 if not csv_entry:
                     no_match += 1
@@ -924,7 +1033,7 @@ class TagEOLCiscoFortinetDevices(Script):
                     self.log_warning(
                         f"[Cisco][CSV] No lifecycle match for device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
-                        f"identifier={identifier} | serial={serial}"
+                        f"tried_identifiers={', '.join(lookup_identifiers)}"
                     )
                     continue
 
@@ -944,7 +1053,7 @@ class TagEOLCiscoFortinetDevices(Script):
                     self.log_success(
                         f"[Cisco][CSV][EOL] device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
-                        f"identifier={identifier} | serial={serial} | "
+                        f"matched_identifier={matched_identifier} | "
                         f"csv_identifier={csv_entry.get('raw_identifier')} | "
                         f"lifecycle_value={csv_entry.get('raw_lifecycle_value')} | "
                         f"eol_date={csv_entry.get('eol_date')}"
@@ -961,7 +1070,7 @@ class TagEOLCiscoFortinetDevices(Script):
                     self.log_warning(
                         f"[Cisco][CSV][UNKNOWN] device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
-                        f"identifier={identifier} | serial={serial} | "
+                        f"matched_identifier={matched_identifier} | "
                         f"csv_identifier={csv_entry.get('raw_identifier')} | "
                         f"lifecycle_value={csv_entry.get('raw_lifecycle_value')}"
                     )
@@ -979,15 +1088,12 @@ class TagEOLCiscoFortinetDevices(Script):
             for device in fortinet_devices:
                 evaluated += 1
 
-                identifier = self._device_identifier(device)
-                serial = self._device_serial(device)
+                lookup_identifiers = self._device_lookup_identifiers(device)
 
-                entry = None
-
-                if identifier and identifier in fortinet_lifecycle:
-                    entry = fortinet_lifecycle[identifier]
-                elif serial and serial in fortinet_lifecycle:
-                    entry = fortinet_lifecycle[serial]
+                matched_identifier, entry = self._find_lifecycle_entry(
+                    fortinet_lifecycle,
+                    lookup_identifiers,
+                )
 
                 if not entry:
                     no_match += 1
@@ -997,7 +1103,7 @@ class TagEOLCiscoFortinetDevices(Script):
                     self.log_warning(
                         f"[Fortinet][CSV] No lifecycle match for device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
-                        f"identifier={identifier} | serial={serial}"
+                        f"tried_identifiers={', '.join(lookup_identifiers)}"
                     )
                     continue
 
@@ -1017,7 +1123,7 @@ class TagEOLCiscoFortinetDevices(Script):
                     self.log_success(
                         f"[Fortinet][CSV][EOL] device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
-                        f"identifier={identifier} | serial={serial} | "
+                        f"matched_identifier={matched_identifier} | "
                         f"csv_identifier={entry.get('raw_identifier')} | "
                         f"lifecycle_value={entry.get('raw_lifecycle_value')} | "
                         f"eol_date={entry.get('eol_date')}"
@@ -1034,7 +1140,7 @@ class TagEOLCiscoFortinetDevices(Script):
                     self.log_warning(
                         f"[Fortinet][CSV][UNKNOWN] device={device.name} | "
                         f"site={device.site.name if device.site else '-'} | "
-                        f"identifier={identifier} | serial={serial} | "
+                        f"matched_identifier={matched_identifier} | "
                         f"csv_identifier={entry.get('raw_identifier')} | "
                         f"lifecycle_value={entry.get('raw_lifecycle_value')}"
                     )
