@@ -1,27 +1,30 @@
 """
 tag_eol_cisco_fortinet_devices.py
 
-NetBox 4.5.0 custom script
---------------------------
+NetBox custom script
+--------------------
 Purpose:
-    - Query Cisco lifecycle data using Cisco's authenticated EoX API
-    - Read Fortinet lifecycle data from a CSV file on the NetBox server
-    - Match NetBox devices against those lifecycle sources
-    - Tag devices that are already EOL / EOS with the tag "EOL"
-    - Log matched devices and print summary counters at the end
-
-Design notes:
     - Cisco:
-        * Uses OAuth2 client credentials
-        * Looks up by Product ID first (DeviceType.part_number or model)
-        * Falls back to Serial Number if needed
+        * If "Use API" is unchecked:
+            - Use Cisco EOL CSV only
+            - Do not call Cisco API
+        * If "Use API" is checked:
+            - Use Cisco API only
+            - Do not load or use Cisco CSV
     - Fortinet:
-        * Reads a CSV file from a server-side path
-        * Uses configurable CSV column names so the script can adapt to the
-          actual export format used in your environment
+        * Use Fortinet EOL CSV only
+    - Tag EOL/EOS devices with "EOL"
+    - Print detailed logs and counters
 
-NetBox compatibility:
-    - Written for NetBox 4.5.x custom scripts
+Recommended Cisco CSV example:
+    Product,LastDateOfSupport
+    C9300-48P,2029-10-31
+    ISR4331/K9,2026-12-31
+
+Recommended Fortinet CSV example:
+    Product,End of Support
+    FG-100F,2030-01-01
+    FG-200E,2028-06-30
 """
 
 from __future__ import annotations
@@ -34,43 +37,106 @@ from collections import defaultdict
 
 import requests
 from requests import RequestException
+
 from django.db.models import Q
 from django.forms.widgets import PasswordInput
 
 from dcim.models import Device
 from extras.models import Tag
-from extras.scripts import Script, StringVar
+from extras.scripts import Script, StringVar, BooleanVar
 
 
 class TagEOLCiscoFortinetDevices(Script):
     """
-    Custom script to tag Cisco and Fortinet devices as EOL based on:
-      - Cisco authenticated EoX API
-      - Fortinet lifecycle CSV file
+    Tags Cisco and Fortinet devices as EOL based on:
+      - Cisco CSV only when Use API is unchecked
+      - Cisco API only when Use API is checked
+      - Fortinet CSV only
     """
 
     # ---------------------------------------------------------------------
-    # User inputs shown in the NetBox UI
+    # Cisco mode selector
+    # ---------------------------------------------------------------------
+
+    use_api = BooleanVar(
+        label="Use API",
+        description=(
+            "Unchecked = Cisco EOL is checked using Cisco CSV only. "
+            "Checked = Cisco EOL is checked using Cisco API only."
+        ),
+        default=False,
+        required=False,
+    )
+
+    # ---------------------------------------------------------------------
+    # Cisco API inputs
+    # Not mandatory in the form
     # ---------------------------------------------------------------------
 
     cisco_client_id = StringVar(
         label="Cisco Client ID",
-        description="Cisco Support API Client ID (OAuth2 client credentials).",
+        description=(
+            "Cisco Support APIs / EoX Client ID. "
+            "Only used when 'Use API' is checked."
+        ),
         required=False,
     )
 
     cisco_client_secret = StringVar(
         label="Cisco Client Secret",
-        description="Cisco Support API Client Secret.",
+        description=(
+            "Cisco Support APIs / EoX Client Secret. "
+            "Only used when 'Use API' is checked."
+        ),
         required=False,
         widget=PasswordInput,
     )
 
-    fortinet_csv_path = StringVar(
-        label="Fortinet CSV path",
+    # ---------------------------------------------------------------------
+    # Cisco CSV inputs
+    # Not mandatory in the form
+    # ---------------------------------------------------------------------
+
+    cisco_csv_path = StringVar(
+        label="Cisco EOL CSV path",
         description=(
-            "Absolute path on the NetBox server to the Fortinet lifecycle CSV file, "
-            "for example: /opt/netbox/netbox/scripts/data/fortinet_eol.csv"
+            "Absolute path on the NetBox server to the Cisco EOL CSV file. "
+            "Only used when 'Use API' is unchecked. "
+            "Example: /opt/netbox/netbox/scripts/Cisco_EOL.csv"
+        ),
+        required=False,
+    )
+
+    cisco_identifier_column = StringVar(
+        label="Cisco CSV identifier column",
+        description=(
+            "Column name in the Cisco CSV that identifies the product or serial. "
+            "Examples: Product, PID, SKU, Model, Serial"
+        ),
+        default="Product",
+        required=False,
+    )
+
+    cisco_eol_date_column = StringVar(
+        label="Cisco CSV EOL date column",
+        description=(
+            "Column name in the Cisco CSV containing the EOL / Last Date of Support. "
+            "Examples: LastDateOfSupport, Last Date of Support, End of Support"
+        ),
+        default="LastDateOfSupport",
+        required=False,
+    )
+
+    # ---------------------------------------------------------------------
+    # Fortinet CSV inputs
+    # Not mandatory in the form
+    # ---------------------------------------------------------------------
+
+    fortinet_csv_path = StringVar(
+        label="Fortinet EOL CSV path",
+        description=(
+            "Absolute path on the NetBox server to the Fortinet lifecycle CSV file. "
+            "Example: /opt/netbox/netbox/scripts/Fortinet_EOL_260623.csv"
         ),
         required=False,
     )
@@ -78,8 +144,8 @@ class TagEOLCiscoFortinetDevices(Script):
     fortinet_identifier_column = StringVar(
         label="Fortinet CSV identifier column",
         description=(
-            "Column name in the Fortinet CSV that identifies the product, "
-            "for example: Product, SKU, Model, Part Number"
+            "Column name in the Fortinet CSV that identifies the product. "
+            "Examples: Product, SKU, Model, Part Number, Serial"
         ),
         default="Product",
         required=False,
@@ -88,8 +154,8 @@ class TagEOLCiscoFortinetDevices(Script):
     fortinet_eol_date_column = StringVar(
         label="Fortinet CSV EOL/EOS date column",
         description=(
-            "Column name in the Fortinet CSV that contains the EOL / EOS date, "
-            "for example: End of Support, EOS, End of Service Life"
+            "Column name in the Fortinet CSV containing the End of Support / EOS date. "
+            "Examples: End of Support, EOS, End of Service Life"
         ),
         default="End of Support",
         required=False,
@@ -98,12 +164,16 @@ class TagEOLCiscoFortinetDevices(Script):
     class Meta:
         name = "Tag Cisco / Fortinet EOL Devices"
         description = (
-            "Uses Cisco's authenticated EoX API and a Fortinet CSV file to identify "
-            "EOL / EOS devices in NetBox, tag them with 'EOL', and print counters."
+            "Checks Cisco EOL using either CSV or API depending on the 'Use API' checkbox. "
+            "Checks Fortinet EOL using CSV. Tags EOL devices with 'EOL' and prints counters."
         )
         field_order = [
+            "use_api",
             "cisco_client_id",
             "cisco_client_secret",
+            "cisco_csv_path",
+            "cisco_identifier_column",
+            "cisco_eol_date_column",
             "fortinet_csv_path",
             "fortinet_identifier_column",
             "fortinet_eol_date_column",
@@ -116,17 +186,28 @@ class TagEOLCiscoFortinetDevices(Script):
     # ---------------------------------------------------------------------
 
     def _today(self) -> date:
-        """Return today's date."""
         return date.today()
+
+    def _clean_path(self, value):
+        """
+        Clean path input from accidental surrounding quotes or trailing apostrophes.
+        """
+        if value is None:
+            return ""
+
+        value = str(value).strip()
+
+        # Remove surrounding quotes if user pasted them
+        value = value.strip("'").strip('"').strip()
+
+        return value
 
     def _normalise(self, value):
         """
         Normalise identifiers for matching.
 
-        The function:
-            - casts to string
-            - strips whitespace
-            - uppercases the value
+        Example:
+            " fg-100f " -> "FG-100F"
         """
         if value is None:
             return None
@@ -139,20 +220,18 @@ class TagEOLCiscoFortinetDevices(Script):
 
     def _parse_date(self, value):
         """
-        Parse a date from several known formats.
-
-        Supports:
-            - Cisco dict format: {"value": "YYYY-MM-DD", ...}
+        Parse dates from:
+            - Cisco API dict format:
+                {"value": "2029-10-31", "dateFormat": "YYYY-MM-DD"}
             - Plain strings:
-                * YYYY-MM-DD
-                * YYYY/MM/DD
-                * DD-MM-YYYY
-                * DD/MM/YYYY
+                YYYY-MM-DD
+                YYYY/MM/DD
+                DD-MM-YYYY
+                DD/MM/YYYY
         """
         if value is None:
             return None
 
-        # Cisco often returns dates as dictionaries with a "value" key.
         if isinstance(value, dict):
             value = value.get("value")
 
@@ -160,7 +239,8 @@ class TagEOLCiscoFortinetDevices(Script):
             return None
 
         value = str(value).strip()
-        if not value or value in {"-", "N/A", "NONE"}:
+
+        if not value or value.upper() in {"-", "N/A", "NONE", "NULL"}:
             return None
 
         for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
@@ -172,13 +252,11 @@ class TagEOLCiscoFortinetDevices(Script):
         return None
 
     def _chunked(self, items, size):
-        """
-        Yield the given list in fixed-size chunks.
-        Useful because Cisco's API supports batching.
-        """
         batch = []
+
         for item in items:
             batch.append(item)
+
             if len(batch) >= size:
                 yield batch
                 batch = []
@@ -189,25 +267,21 @@ class TagEOLCiscoFortinetDevices(Script):
     def _ensure_eol_tag(self):
         """
         Ensure the NetBox tag 'EOL' exists.
-
-        This mirrors the tagging pattern already used in the existing
-        tag-orphaned-meraki-devices.py script.
+        Uses NetBox colour value f44336, which is red.
         """
         tag, _ = Tag.objects.get_or_create(
             slug="eol",
             defaults={
                 "name": "EOL",
                 "description": "Device is end-of-life / end-of-support",
-                "color": "red",
+                "color": "f44336",
             },
         )
         return tag
 
     def _device_vendor(self, device):
-        """
-        Return the lowercase device manufacturer name, if available.
-        """
         manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+
         if not manufacturer or not manufacturer.name:
             return None
 
@@ -215,13 +289,14 @@ class TagEOLCiscoFortinetDevices(Script):
 
     def _device_identifier(self, device):
         """
-        Preferred lifecycle identifier for the device.
+        Preferred lifecycle identifier.
 
         Order:
-            1. DeviceType.part_number
-            2. DeviceType.model
+            1. Device Type Part Number
+            2. Device Type Model
         """
         device_type = getattr(device, "device_type", None)
+
         if not device_type:
             return None
 
@@ -231,20 +306,107 @@ class TagEOLCiscoFortinetDevices(Script):
         return self._normalise(part_number or model)
 
     def _device_serial(self, device):
-        """
-        Return the device serial number in normalised form.
-        """
         return self._normalise(getattr(device, "serial", None))
+
+    def _tag_device(self, device, tag, commit):
+        """
+        Add EOL tag to a device if not already present.
+
+        Returns:
+            True  = tag already existed
+            False = tag did not exist before this run
+        """
+        already_present = device.tags.filter(slug=tag.slug).exists()
+
+        if commit and not already_present:
+            device.tags.add(tag)
+            device.save()
+
+        return already_present
+
+    # ---------------------------------------------------------------------
+    # Generic CSV loader
+    # ---------------------------------------------------------------------
+
+    def _detect_csv_dialect(self, file_path):
+        """
+        Detect comma or semicolon delimiter.
+        Defaults to standard CSV if detection fails.
+        """
+        with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
+            sample = handle.read(4096)
+
+        try:
+            return csv.Sniffer().sniff(sample, delimiters=",;")
+        except csv.Error:
+            return csv.excel
+
+    def _load_lifecycle_csv(self, file_path, identifier_column, eol_date_column, label):
+        """
+        Load lifecycle CSV into a dictionary.
+
+        Returns:
+            {
+                "NORMALISED_IDENTIFIER": {
+                    "raw_identifier": "...",
+                    "eol_date": date(...),
+                    "row": {...}
+                }
+            }
+        """
+        if not file_path:
+            return {}
+
+        file_path = self._clean_path(file_path)
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"{label} CSV file does not exist: {file_path}")
+
+        dialect = self._detect_csv_dialect(file_path)
+        lifecycle_map = {}
+
+        with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle, dialect=dialect)
+
+            if not reader.fieldnames:
+                raise ValueError(f"{label} CSV is empty or missing headers.")
+
+            missing_columns = [
+                column
+                for column in [identifier_column, eol_date_column]
+                if column not in reader.fieldnames
+            ]
+
+            if missing_columns:
+                raise ValueError(
+                    f"{label} CSV is missing column(s): {', '.join(missing_columns)}. "
+                    f"Detected columns: {', '.join(reader.fieldnames)}"
+                )
+
+            for row in reader:
+                raw_identifier = row.get(identifier_column)
+                key = self._normalise(raw_identifier)
+
+                if not key:
+                    continue
+
+                lifecycle_map[key] = {
+                    "raw_identifier": raw_identifier,
+                    "eol_date": self._parse_date(row.get(eol_date_column)),
+                    "row": row,
+                }
+
+        return lifecycle_map
+
+    def _is_csv_eol(self, entry):
+        eol_date = entry.get("eol_date")
+        return bool(eol_date and eol_date <= self._today())
 
     # ---------------------------------------------------------------------
     # Cisco API helpers
     # ---------------------------------------------------------------------
 
     def _get_cisco_token(self, client_id, client_secret):
-        """
-        Obtain a Cisco bearer token using the documented OAuth2
-        client-credentials flow.
-        """
         token_url = "https://id.cisco.com/oauth2/default/v1/token"
 
         response = requests.post(
@@ -257,34 +419,28 @@ class TagEOLCiscoFortinetDevices(Script):
             },
             timeout=60,
         )
+
         response.raise_for_status()
 
         payload = response.json()
-        access_token = payload.get("access_token")
-        if not access_token:
-            raise RuntimeError("Cisco token response did not contain access_token.")
+        token = payload.get("access_token")
 
-        return access_token
+        if not token:
+            raise RuntimeError("Cisco token response did not include access_token.")
+
+        return token
 
     def _select_best_cisco_record(self, records):
         """
-        Cisco can return multiple EoX records for a single PID.
-        Keep the record with the latest LastDateOfSupport.
+        Cisco can return multiple EoX records for the same PID.
+        Select the one with the latest LastDateOfSupport.
         """
         def sort_key(record):
-            lifecycle_date = self._parse_date(record.get("LastDateOfSupport"))
-            return lifecycle_date or date.min
+            return self._parse_date(record.get("LastDateOfSupport")) or date.min
 
         return sorted(records, key=sort_key, reverse=True)[0]
 
     def _cisco_lookup_by_pid(self, bearer_token, product_ids):
-        """
-        Look up Cisco lifecycle entries by Product ID.
-
-        The Cisco API supports up to 20 product IDs per request.
-        Returns:
-            dict[PID] = best record
-        """
         headers = {
             "Authorization": f"Bearer {bearer_token}",
             "Accept": "application/json",
@@ -306,31 +462,26 @@ class TagEOLCiscoFortinetDevices(Script):
 
             payload = response.json()
             records = payload.get("EOXRecord", [])
+
             if isinstance(records, dict):
                 records = [records]
 
             for record in records:
                 returned_pid = self._normalise(record.get("EOLProductID"))
+                input_value = self._normalise(record.get("EOXInputValue"))
+
                 if returned_pid:
                     records_by_pid[returned_pid].append(record)
 
-                input_value = self._normalise(record.get("EOXInputValue"))
                 if input_value:
                     records_by_pid[input_value].append(record)
 
         return {
-            pid: self._select_best_cisco_record(lines)
-            for pid, lines in records_by_pid.items()
+            pid: self._select_best_cisco_record(records)
+            for pid, records in records_by_pid.items()
         }
 
     def _cisco_lookup_by_serial(self, bearer_token, serials):
-        """
-        Look up Cisco lifecycle entries by Serial Number.
-
-        The Cisco API supports up to 20 serial numbers per request.
-        Returns:
-            dict[SERIAL] = record
-        """
         headers = {
             "Authorization": f"Bearer {bearer_token}",
             "Accept": "application/json",
@@ -352,122 +503,44 @@ class TagEOLCiscoFortinetDevices(Script):
 
             payload = response.json()
             records = payload.get("EOXRecord", [])
+
             if isinstance(records, dict):
                 records = [records]
 
             for record in records:
                 input_value = self._normalise(record.get("EOXInputValue"))
+
                 if input_value:
                     records_by_serial[input_value] = record
 
         return records_by_serial
 
-    def _is_cisco_eol(self, record):
-        """
-        Determine whether a Cisco record is already EOL.
-
-        Rule:
-            EOL if LastDateOfSupport <= today
-        """
+    def _is_cisco_api_eol(self, record):
         last_support = self._parse_date(record.get("LastDateOfSupport"))
         return bool(last_support and last_support <= self._today())
 
     # ---------------------------------------------------------------------
-    # Fortinet CSV helpers
-    # ---------------------------------------------------------------------
-
-    def _detect_csv_dialect(self, file_path):
-        """
-        Detect whether the Fortinet CSV uses comma or semicolon separators.
-        Falls back to csv.excel if sniffer cannot determine the dialect.
-        """
-        with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
-            sample = handle.read(4096)
-            handle.seek(0)
-
-            try:
-                return csv.Sniffer().sniff(sample, delimiters=",;")
-            except csv.Error:
-                return csv.excel
-
-    def _load_fortinet_csv(self, file_path, identifier_column, eol_date_column):
-        """
-        Load Fortinet lifecycle data from a CSV file.
-
-        Returns:
-            dict[IDENTIFIER] = {
-                "raw_identifier": original value,
-                "eol_date": parsed date,
-                "row": full CSV row
-            }
-        """
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Fortinet CSV file does not exist: {file_path}")
-
-        dialect = self._detect_csv_dialect(file_path)
-        lifecycle_map = {}
-
-        with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle, dialect=dialect)
-
-            if not reader.fieldnames:
-                raise ValueError("Fortinet CSV appears to be empty or missing headers.")
-
-            missing = [
-                col for col in [identifier_column, eol_date_column]
-                if col not in reader.fieldnames
-            ]
-            if missing:
-                raise ValueError(
-                    f"Fortinet CSV is missing expected column(s): {', '.join(missing)}. "
-                    f"Detected columns: {', '.join(reader.fieldnames)}"
-                )
-
-            for row in reader:
-                raw_identifier = row.get(identifier_column)
-                key = self._normalise(raw_identifier)
-                if not key:
-                    continue
-
-                parsed_date = self._parse_date(row.get(eol_date_column))
-                lifecycle_map[key] = {
-                    "raw_identifier": raw_identifier,
-                    "eol_date": parsed_date,
-                    "row": row,
-                }
-
-        return lifecycle_map
-
-    def _is_fortinet_eol(self, entry):
-        """
-        Determine whether a Fortinet CSV entry is already EOL / EOS.
-
-        Rule:
-            EOL if CSV EOL date <= today
-        """
-        date_value = entry.get("eol_date")
-        return bool(date_value and date_value <= self._today())
-
-    # ---------------------------------------------------------------------
-    # Main logic
+    # Main
     # ---------------------------------------------------------------------
 
     def run(self, data, commit):
-        """
-        Main script entrypoint.
-        """
-        # Read form data.
+        eol_tag = self._ensure_eol_tag()
+
+        use_api = data.get("use_api", False)
+
         cisco_client_id = (data.get("cisco_client_id") or "").strip()
         cisco_client_secret = (data.get("cisco_client_secret") or "").strip()
 
-        fortinet_csv_path = (data.get("fortinet_csv_path") or "").strip()
+        cisco_csv_path = self._clean_path(data.get("cisco_csv_path") or "")
+        cisco_identifier_column = (data.get("cisco_identifier_column") or "Product").strip()
+        cisco_eol_date_column = (data.get("cisco_eol_date_column") or "LastDateOfSupport").strip()
+
+        fortinet_csv_path = self._clean_path(data.get("fortinet_csv_path") or "")
         fortinet_identifier_column = (data.get("fortinet_identifier_column") or "Product").strip()
         fortinet_eol_date_column = (data.get("fortinet_eol_date_column") or "End of Support").strip()
 
-        # Ensure the EOL tag exists.
-        eol_tag = self._ensure_eol_tag()
+        self.log_info(f"Cisco Use API mode: {use_api}")
 
-        # Collect Cisco and Fortinet devices from NetBox.
         devices = (
             Device.objects
             .select_related("site", "device_type__manufacturer")
@@ -483,9 +556,10 @@ class TagEOLCiscoFortinetDevices(Script):
 
         for device in devices:
             vendor = self._device_vendor(device)
+
             if not vendor:
                 self.log_warning(
-                    f"{device.name or '[unnamed device]'}: Missing manufacturer on device type."
+                    f"{device.name or '[unnamed]'}: Missing manufacturer on device type."
                 )
                 continue
 
@@ -498,214 +572,314 @@ class TagEOLCiscoFortinetDevices(Script):
         self.log_info(f"Fortinet devices found: {len(fortinet_devices)}")
 
         # -----------------------------------------------------------------
-        # Cisco lookups
+        # Source state
         # -----------------------------------------------------------------
+
+        cisco_csv_lifecycle = {}
+        cisco_api_available = False
         cisco_records_by_pid = {}
         cisco_records_by_serial = {}
 
-        if cisco_devices:
+        fortinet_lifecycle = {}
+
+        cisco_source_enabled = False
+        fortinet_source_enabled = False
+
+        # -----------------------------------------------------------------
+        # Cisco source selection
+        # -----------------------------------------------------------------
+
+        if use_api:
+            # Cisco API ONLY
+            self.log_info("Cisco mode selected: API only. Cisco CSV will not be loaded.")
+
             if not cisco_client_id or not cisco_client_secret:
                 self.log_warning(
-                    "Cisco credentials were not supplied, so Cisco EOL checks are skipped."
+                    "Use API is checked, but Cisco Client ID and/or Cisco Client Secret is missing. "
+                    "Cisco EOL checks will be skipped."
                 )
             else:
                 try:
-                    bearer_token = self._get_cisco_token(
-                        cisco_client_id,
-                        cisco_client_secret,
-                    )
+                    token = self._get_cisco_token(cisco_client_id, cisco_client_secret)
+                    cisco_api_available = True
+                    cisco_source_enabled = True
 
-                    pid_list = [
+                    cisco_pids = [
                         self._device_identifier(device)
                         for device in cisco_devices
                         if self._device_identifier(device)
                     ]
-                    serial_list = [
+
+                    cisco_serials = [
                         self._device_serial(device)
                         for device in cisco_devices
                         if self._device_serial(device)
                     ]
 
-                    if pid_list:
-                        cisco_records_by_pid = self._cisco_lookup_by_pid(
-                            bearer_token,
-                            pid_list,
-                        )
+                    if cisco_pids:
+                        cisco_records_by_pid = self._cisco_lookup_by_pid(token, cisco_pids)
                         self.log_info(
-                            f"Cisco Product ID lookups completed: {len(set(pid_list))} identifiers."
+                            f"Cisco API PID lookups completed: {len(set(cisco_pids))} unique identifiers."
                         )
 
-                    if serial_list:
-                        cisco_records_by_serial = self._cisco_lookup_by_serial(
-                            bearer_token,
-                            serial_list,
-                        )
+                    if cisco_serials:
+                        cisco_records_by_serial = self._cisco_lookup_by_serial(token, cisco_serials)
                         self.log_info(
-                            f"Cisco serial lookups completed: {len(set(serial_list))} serials."
+                            f"Cisco API serial lookups completed: {len(set(cisco_serials))} unique serials."
                         )
 
                 except RequestException as exc:
-                    self.log_failure(f"Cisco API request failed: {exc}")
+                    self.log_failure(
+                        f"Cisco API request failed. Since Use API is checked, Cisco CSV will not be used. "
+                        f"Error: {exc}"
+                    )
                 except Exception as exc:
-                    self.log_failure(f"Cisco lookup failed: {exc}")
+                    self.log_failure(
+                        f"Cisco API lookup failed. Since Use API is checked, Cisco CSV will not be used. "
+                        f"Error: {exc}"
+                    )
+
+        else:
+            # Cisco CSV ONLY
+            self.log_info("Cisco mode selected: CSV only. Cisco API will not be called.")
+
+            if not cisco_csv_path:
+                self.log_warning(
+                    "Use API is unchecked, but Cisco CSV path is missing. "
+                    "Cisco EOL checks will be skipped."
+                )
+            else:
+                try:
+                    cisco_csv_lifecycle = self._load_lifecycle_csv(
+                        cisco_csv_path,
+                        cisco_identifier_column,
+                        cisco_eol_date_column,
+                        "Cisco",
+                    )
+
+                    cisco_source_enabled = True
+
+                    self.log_info(
+                        f"Cisco CSV loaded: {len(cisco_csv_lifecycle)} entries."
+                    )
+
+                except Exception as exc:
+                    self.log_failure(f"Cisco CSV load failed: {exc}")
 
         # -----------------------------------------------------------------
         # Fortinet CSV load
         # -----------------------------------------------------------------
-        fortinet_lifecycle = {}
 
-        if fortinet_devices:
-            if not fortinet_csv_path:
-                self.log_warning(
-                    "Fortinet CSV path was not supplied, so Fortinet EOL checks are skipped."
+        if not fortinet_csv_path:
+            self.log_warning(
+                "Fortinet CSV path is missing. Fortinet EOL checks will be skipped."
+            )
+        else:
+            try:
+                fortinet_lifecycle = self._load_lifecycle_csv(
+                    fortinet_csv_path,
+                    fortinet_identifier_column,
+                    fortinet_eol_date_column,
+                    "Fortinet",
                 )
-            else:
-                try:
-                    fortinet_lifecycle = self._load_fortinet_csv(
-                        fortinet_csv_path,
-                        fortinet_identifier_column,
-                        fortinet_eol_date_column,
-                    )
-                    self.log_info(
-                        f"Fortinet CSV loaded successfully: {len(fortinet_lifecycle)} lifecycle entries."
-                    )
-                except Exception as exc:
-                    self.log_failure(f"Fortinet CSV load failed: {exc}")
+
+                fortinet_source_enabled = True
+
+                self.log_info(
+                    f"Fortinet CSV loaded: {len(fortinet_lifecycle)} entries."
+                )
+
+            except Exception as exc:
+                self.log_failure(f"Fortinet CSV load failed: {exc}")
 
         # -----------------------------------------------------------------
-        # Evaluate devices and tag EOL devices
+        # Evaluation counters
         # -----------------------------------------------------------------
+
         evaluated = 0
-        no_match = 0
+        skipped_due_to_missing_source = 0
         total_eol = 0
-        cisco_eol = 0
-        fortinet_eol = 0
+
+        cisco_eol_api = 0
+        cisco_eol_csv = 0
+        fortinet_eol_csv = 0
+
         newly_tagged = 0
         already_tagged = 0
+        no_match = 0
 
+        # -----------------------------------------------------------------
         # Cisco evaluation
-        for device in cisco_devices:
-            evaluated += 1
+        # -----------------------------------------------------------------
 
-            identifier = self._device_identifier(device)
-            serial = self._device_serial(device)
+        if not cisco_source_enabled:
+            skipped_due_to_missing_source += len(cisco_devices)
+            self.log_warning(
+                f"Cisco EOL checks skipped for {len(cisco_devices)} devices because no Cisco source is available."
+            )
+        else:
+            for device in cisco_devices:
+                evaluated += 1
 
-            record = None
-            source = None
+                identifier = self._device_identifier(device)
+                serial = self._device_serial(device)
 
-            # Prefer Product ID
-            if identifier and identifier in cisco_records_by_pid:
-                record = cisco_records_by_pid[identifier]
-                source = f"PID:{identifier}"
+                # ---------------------------------------------------------
+                # Cisco API ONLY mode
+                # ---------------------------------------------------------
 
-            # Fallback to Serial
-            elif serial and serial in cisco_records_by_serial:
-                record = cisco_records_by_serial[serial]
-                source = f"SERIAL:{serial}"
+                if use_api:
+                    api_record = None
 
-            if not record:
-                no_match += 1
-                self.log_warning(
-                    f"[Cisco] No lifecycle match for device={device.name}, "
-                    f"site={device.site.name if device.site else '-'}, "
-                    f"identifier={identifier}, serial={serial}"
-                )
-                continue
+                    if identifier and identifier in cisco_records_by_pid:
+                        api_record = cisco_records_by_pid[identifier]
+                    elif serial and serial in cisco_records_by_serial:
+                        api_record = cisco_records_by_serial[serial]
 
-            if self._is_cisco_eol(record):
-                total_eol += 1
-                cisco_eol += 1
+                    if not api_record:
+                        no_match += 1
+                        self.log_warning(
+                            f"[Cisco][API] No lifecycle match for device={device.name} | "
+                            f"site={device.site.name if device.site else '-'} | "
+                            f"identifier={identifier} | serial={serial}"
+                        )
+                        continue
 
-                already_present = device.tags.filter(slug="eol").exists()
+                    if self._is_cisco_api_eol(api_record):
+                        total_eol += 1
+                        cisco_eol_api += 1
 
-                if commit and not already_present:
-                    device.tags.add(eol_tag)
-                    device.save()
+                        was_already_tagged = self._tag_device(device, eol_tag, commit)
 
-                if already_present:
-                    already_tagged += 1
-                else:
-                    newly_tagged += 1
+                        if was_already_tagged:
+                            already_tagged += 1
+                        else:
+                            newly_tagged += 1
 
-                last_support = self._parse_date(record.get("LastDateOfSupport"))
-                matched_pid = record.get("EOLProductID")
-                bulletin = record.get("ProductBulletinNumber")
+                        last_support = self._parse_date(api_record.get("LastDateOfSupport"))
 
-                self.log_success(
-                    f"[Cisco][EOL] device={device.name} | "
-                    f"site={device.site.name if device.site else '-'} | "
-                    f"matched_pid={matched_pid} | "
-                    f"last_date_of_support={last_support} | "
-                    f"bulletin={bulletin} | "
-                    f"lookup_source={source}"
-                )
+                        self.log_success(
+                            f"[Cisco][API][EOL] device={device.name} | "
+                            f"site={device.site.name if device.site else '-'} | "
+                            f"identifier={identifier} | serial={serial} | "
+                            f"last_date_of_support={last_support} | "
+                            f"matched_pid={api_record.get('EOLProductID')}"
+                        )
 
+                    continue
+
+                # ---------------------------------------------------------
+                # Cisco CSV ONLY mode
+                # ---------------------------------------------------------
+
+                csv_entry = None
+
+                if identifier and identifier in cisco_csv_lifecycle:
+                    csv_entry = cisco_csv_lifecycle[identifier]
+                elif serial and serial in cisco_csv_lifecycle:
+                    csv_entry = cisco_csv_lifecycle[serial]
+
+                if not csv_entry:
+                    no_match += 1
+                    self.log_warning(
+                        f"[Cisco][CSV] No lifecycle match for device={device.name} | "
+                        f"site={device.site.name if device.site else '-'} | "
+                        f"identifier={identifier} | serial={serial}"
+                    )
+                    continue
+
+                if self._is_csv_eol(csv_entry):
+                    total_eol += 1
+                    cisco_eol_csv += 1
+
+                    was_already_tagged = self._tag_device(device, eol_tag, commit)
+
+                    if was_already_tagged:
+                        already_tagged += 1
+                    else:
+                        newly_tagged += 1
+
+                    self.log_success(
+                        f"[Cisco][CSV][EOL] device={device.name} | "
+                        f"site={device.site.name if device.site else '-'} | "
+                        f"identifier={identifier} | serial={serial} | "
+                        f"csv_identifier={csv_entry.get('raw_identifier')} | "
+                        f"eol_date={csv_entry.get('eol_date')}"
+                    )
+
+        # -----------------------------------------------------------------
         # Fortinet evaluation
-        for device in fortinet_devices:
-            evaluated += 1
+        # -----------------------------------------------------------------
 
-            identifier = self._device_identifier(device)
-            serial = self._device_serial(device)
+        if not fortinet_source_enabled:
+            skipped_due_to_missing_source += len(fortinet_devices)
+            self.log_warning(
+                f"Fortinet EOL checks skipped for {len(fortinet_devices)} devices because no Fortinet CSV source is available."
+            )
+        else:
+            for device in fortinet_devices:
+                evaluated += 1
 
-            # For Fortinet CSV matching, prefer identifier first; optionally try serial
-            # if your CSV is based on serial numbers instead of product identifiers.
-            entry = None
-            source = None
+                identifier = self._device_identifier(device)
+                serial = self._device_serial(device)
 
-            if identifier and identifier in fortinet_lifecycle:
-                entry = fortinet_lifecycle[identifier]
-                source = f"CSV_ID:{identifier}"
-            elif serial and serial in fortinet_lifecycle:
-                entry = fortinet_lifecycle[serial]
-                source = f"CSV_SERIAL:{serial}"
+                entry = None
 
-            if not entry:
-                no_match += 1
-                self.log_warning(
-                    f"[Fortinet] No lifecycle match for device={device.name}, "
-                    f"site={device.site.name if device.site else '-'}, "
-                    f"identifier={identifier}, serial={serial}"
-                )
-                continue
+                if identifier and identifier in fortinet_lifecycle:
+                    entry = fortinet_lifecycle[identifier]
+                elif serial and serial in fortinet_lifecycle:
+                    entry = fortinet_lifecycle[serial]
 
-            if self._is_fortinet_eol(entry):
-                total_eol += 1
-                fortinet_eol += 1
+                if not entry:
+                    no_match += 1
+                    self.log_warning(
+                        f"[Fortinet][CSV] No lifecycle match for device={device.name} | "
+                        f"site={device.site.name if device.site else '-'} | "
+                        f"identifier={identifier} | serial={serial}"
+                    )
+                    continue
 
-                already_present = device.tags.filter(slug="eol").exists()
+                if self._is_csv_eol(entry):
+                    total_eol += 1
+                    fortinet_eol_csv += 1
 
-                if commit and not already_present:
-                    device.tags.add(eol_tag)
-                    device.save()
+                    was_already_tagged = self._tag_device(device, eol_tag, commit)
 
-                if already_present:
-                    already_tagged += 1
-                else:
-                    newly_tagged += 1
+                    if was_already_tagged:
+                        already_tagged += 1
+                    else:
+                        newly_tagged += 1
 
-                self.log_success(
-                    f"[Fortinet][EOL] device={device.name} | "
-                    f"site={device.site.name if device.site else '-'} | "
-                    f"csv_identifier={entry.get('raw_identifier')} | "
-                    f"eol_date={entry.get('eol_date')} | "
-                    f"lookup_source={source}"
-                )
+                    self.log_success(
+                        f"[Fortinet][CSV][EOL] device={device.name} | "
+                        f"site={device.site.name if device.site else '-'} | "
+                        f"identifier={identifier} | serial={serial} | "
+                        f"csv_identifier={entry.get('raw_identifier')} | "
+                        f"eol_date={entry.get('eol_date')}"
+                    )
 
         # -----------------------------------------------------------------
         # Final summary
         # -----------------------------------------------------------------
+
         summary = (
             "\n"
             "==== EOL Summary ====\n"
             f"Evaluated devices: {evaluated}\n"
+            f"Skipped due to missing source: {skipped_due_to_missing_source}\n"
             f"Cisco devices found: {len(cisco_devices)}\n"
             f"Fortinet devices found: {len(fortinet_devices)}\n"
+            f"Cisco Use API mode: {use_api}\n"
+            f"Cisco API authentication successful: {cisco_api_available}\n"
+            f"Cisco CSV entries loaded: {len(cisco_csv_lifecycle)}\n"
+            f"Fortinet CSV entries loaded: {len(fortinet_lifecycle)}\n"
             f"EOL devices total: {total_eol}\n"
-            f" - Cisco EOL: {cisco_eol}\n"
-            f" - Fortinet EOL: {fortinet_eol}\n"
-            f"Newly tagged with 'EOL': {newly_tagged}\n"
-            f"Already tagged with 'EOL': {already_tagged}\n"
-            f"No lifecycle match found: {no_match}\n"
+            f" - Cisco EOL from API: {cisco_eol_api}\n"
+            f" - Cisco EOL from CSV: {cisco_eol_csv}\n"
+            f" - Fortinet EOL from CSV: {fortinet_eol_csv}\n"
+            f"Newly tagged with EOL: {newly_tagged}\n"
+            f"Already tagged with EOL: {already_tagged}\n"
+            f"No lifecycle match: {no_match}\n"
             f"Commit mode: {commit}\n"
         )
 
