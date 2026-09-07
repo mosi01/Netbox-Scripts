@@ -133,9 +133,11 @@ class DedicateFreePrefixToSite(Script):
     SITE_VRF_VLAN_MAX = 599
 
     PREFIX_25_VLAN_NAMES: Tuple[str, ...] = (
-        "ap-mgmt",
-        "sw-mgmt",
-        "mgmt",
+        "460-MGMT",
+        "461-MGMT-AP",
+        "462-MGMT-OP",
+        "463-MGMT-EXT",
+        "469-MGMT-FW",
     )
 
     ROLE_BY_NAME_CONTAINS: Tuple[Tuple[str, str], ...] = (
