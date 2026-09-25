@@ -133,7 +133,7 @@ class DedicateFreePrefixToSite(Script):
         )
 
     LINDAB_GROUP_VRF_NAME = "Lindab Group"
-    TENANT_NAME = "Lindab Group (Fortinet)"
+    TENANT_NAME = "Lindab Group"
 
     FIXED_VLAN_DEFINITIONS: Tuple[VLANDefinition, ...] = (
         VLANDefinition(
