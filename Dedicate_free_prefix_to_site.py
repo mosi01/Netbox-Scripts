@@ -412,7 +412,8 @@ class DedicateFreePrefixToSite(Script):
 
         return matches.first()
 
-    def _get_site_vrf(self, site: Site) -> Optional"""Return the site-named VRF if it already exists."""
+    def _get_site_vrf(self, site: Site) -> Optional[VRF]:
+        """Return the site-named VRF if it already exists."""
 
         matches = VRF.objects.filter(name=site.name)
         match_count = matches.count()
@@ -531,7 +532,8 @@ class DedicateFreePrefixToSite(Script):
         container_net: IPNetwork,
         roles_by_name: dict[str, Role],
         tenant: Tenant,
-    ) -> List"""Build the complete allocation plan in the configured order."""
+    ) -> List[PlannedPrefix]:
+        """Build the complete allocation plan in the configured order."""
     
         planned: List[PlannedPrefix] = []
         container_subnets = list(container_net.subnet(24))
