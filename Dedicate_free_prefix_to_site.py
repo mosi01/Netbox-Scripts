@@ -643,6 +643,8 @@ class DedicateFreePrefixToSite(Script):
 
             existing_prefixes = Prefix.objects.filter(
                 vrf=target_vrf
+            ).exclude(
+              status="container"
             )
 
             if not item.use_site_vrf:
