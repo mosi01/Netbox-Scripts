@@ -137,6 +137,11 @@ class DedicateFreePrefixToSite(Script):
 
     FIXED_VLAN_DEFINITIONS: Tuple[VLANDefinition, ...] = (
         VLANDefinition(
+            vid=302,
+            name="302-Client-WMS-WL",
+            role_name="WMS",
+        ),
+        VLANDefinition(
             vid=400,
             name="400-Client",
             role_name="Client Network",
@@ -180,11 +185,6 @@ class DedicateFreePrefixToSite(Script):
             vid=461,
             name="461-MGMT-AP",
             role_name="Management Network",
-        ),
-        VLANDefinition(
-            vid=302,
-            name="302-Client-WMS-WL",
-            role_name="WMS",
         ),
         VLANDefinition(
             vid=570,
