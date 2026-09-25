@@ -643,9 +643,9 @@ class DedicateFreePrefixToSite(Script):
 
             existing_prefixes = Prefix.objects.filter(
                 vrf=target_vrf
-            ).exclude(
-              status="container"
             )
+
+            
 
             if not item.use_site_vrf:
                 existing_prefixes = existing_prefixes.exclude(
@@ -653,6 +653,8 @@ class DedicateFreePrefixToSite(Script):
                 )
 
             for existing in existing_prefixes:
+                if existing.status == "container":
+                    continue
                 try:
                     existing_network = IPNetwork(
                         str(existing.prefix)
