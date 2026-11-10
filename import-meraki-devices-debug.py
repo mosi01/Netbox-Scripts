@@ -136,7 +136,7 @@ class MerakiInventoryReport(Script):
 
     def _get_role_from_model(self, model):
         if model.startswith("MR"):
-            return "Access Point"
+            return "Wireless Accesspoint"
         elif model.startswith("MS"):
             return "Access Switch"
         elif model.startswith("MX") or model.startswith("MG"):
