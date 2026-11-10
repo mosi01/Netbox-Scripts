@@ -105,8 +105,14 @@ class MerakiInventoryReport(Script):
         if data["show_orphaned"]:
             netbox_meraki_serials = Device.objects.filter(
                 device_type__manufacturer=meraki_manufacturer
+            ).exclude(
+                status=DeviceStatusChoices.STATUS_INVENTORY
             ).values_list("serial", flat=True)
-            orphaned_serials = [s for s in netbox_meraki_serials if s not in meraki_serials_in_dashboard]
+
+        orphaned_serials = [
+            s for s in netbox_meraki_serials
+            if s and s not in meraki_serials_in_dashboard
+        ]
 
         # Build human-readable summary
         output_lines = [
