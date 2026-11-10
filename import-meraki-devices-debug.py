@@ -2,6 +2,7 @@
 
 from extras.scripts import Script, StringVar, BooleanVar
 from dcim.models import Device, DeviceType, DeviceRole, Manufacturer, Site
+from dcim.choices import DeviceStatusChoices
 import requests
 from collections import Counter
 
